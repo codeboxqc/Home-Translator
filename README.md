@@ -124,6 +124,12 @@ cmake --build . --config Release
 
 ---
 
+
+<img width="672" height="450" alt="Untitled" src="https://github.com/user-attachments/assets/6a6073c4-a381-433a-8d83-a5f3b8d74b15" />
+<img width="1363" height="905" alt="Untitled" src="https://github.com/user-attachments/assets/aeaab54d-5daa-4965-bbd5-2927a248a029" />
+
+
+
 ## 💻 Integration Example (`infer_core.cpp`)
 
 Below is a minimal snippet demonstrating how cleanly `ai_engine.cpp` integrates with `infer_core.cpp`:
