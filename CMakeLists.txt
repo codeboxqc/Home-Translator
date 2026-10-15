@@ -1,50 +1,83 @@
-cmake_minimum_required(VERSION 3.18)
-project(HomeTranslator LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.16)
+project(HomeTranslator CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Find Dependencies
-find_package(SDL3 REQUIRED)
+# Build Type
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# Compiler optimization flags
+if(MSVC)
+    add_compile_options(/O2 /W4 /MP /utf-8)
+else()
+    add_compile_options(-O3 -Wall -Wextra -pthread)
+endif()
+
+# Find CURL
+find_package(CURL REQUIRED)
+
+# Find OpenGL
 find_package(OpenGL REQUIRED)
-find_package(CURL REQUIRED) # Native vcpkg libcurl
 
-set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/imgui" CACHE PATH "Path to Dear ImGui")
+# Find SDL3
+find_package(SDL3 REQUIRED)
 
-set(IMGUI_SOURCES
-    ${IMGUI_DIR}/imgui.cpp
-    ${IMGUI_DIR}/imgui_draw.cpp
-    ${IMGUI_DIR}/imgui_tables.cpp
-    ${IMGUI_DIR}/imgui_widgets.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+# Include directories
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CURL_INCLUDE_DIRS}
+    ${OPENGL_INCLUDE_DIR}
+    ${SDL3_INCLUDE_DIRS}
 )
 
-add_executable(HomeTranslator
+# ImGui Source Files (Place imgui files in imgui/ or current directory)
+file(GLOB IMGUI_SOURCES
+    "imgui/*.cpp"
+    "imgui/backends/imgui_impl_sdl3.cpp"
+    "imgui/backends/imgui_impl_opengl3.cpp"
+)
+
+# Fallback if ImGui is placed in root folder
+if(NOT IMGUI_SOURCES)
+    file(GLOB IMGUI_SOURCES
+        "imgui.cpp"
+        "imgui_draw.cpp"
+        "imgui_tables.cpp"
+        "imgui_widgets.cpp"
+        "imgui_impl_sdl3.cpp"
+        "imgui_impl_opengl3.cpp"
+    )
+endif()
+
+# Project Sources
+set(APP_SOURCES
     "Home Translator.cpp"
-    ai_engine.cpp
-    app_ui.cpp
-    doc_parser.cpp
-    model_downloader.cpp
-    infer_core.cpp
+    "ai_engine.cpp"
+    "app_ui.cpp"
+    "doc_parser.cpp"
+    "model_downloader.cpp"
     ${IMGUI_SOURCES}
 )
 
-target_include_directories(HomeTranslator PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${IMGUI_DIR}
-    ${IMGUI_DIR}/backends
-)
+add_executable(HomeTranslator ${APP_SOURCES})
 
+# Target Link Libraries
 target_link_libraries(HomeTranslator PRIVATE
-    SDL3::SDL3
+    ${CURL_LIBRARIES}
     OpenGL::GL
-    CURL::libcurl
+    SDL3::SDL3
 )
 
+# Link libinfer
 if(WIN32)
-    target_link_libraries(HomeTranslator PRIVATE opengl32 ws2_32)
+    target_link_libraries(HomeTranslator PRIVATE infer ws2_32)
 else()
-    find_package(Threads REQUIRED)
-    target_link_libraries(HomeTranslator PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    target_link_libraries(HomeTranslator PRIVATE infer pthread dl)
 endif()
+
+# Copy models folder next to binary
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/models")
