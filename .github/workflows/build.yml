@@ -1,0 +1,67 @@
+name: Build Home-Translator
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # Define the operating systems we want to build on
+        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            triplet: x64-windows
+            artifact_name: HomeTranslator-Windows
+          - os: ubuntu-latest
+            triplet: x64-linux
+            artifact_name: HomeTranslator-Linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # Linux requires specific windowing and graphics headers to compile SDL3
+    - name: Install Linux Prerequisites
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libx11-dev libxext-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libwayland-dev libxkbcommon-dev libgl1-mesa-dev
+
+    # Install CURL and SDL3 using vcpkg for the specific OS triplet
+    - name: Install Dependencies
+      run: |
+        vcpkg install curl:${{ matrix.triplet }} sdl3:${{ matrix.triplet }}
+        vcpkg integrate install
+
+    # Configure CMake (uses bash on Linux, PowerShell on Windows)
+    - name: Configure CMake
+      shell: bash
+      run: |
+        cmake -B build \
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+          -DCMAKE_BUILD_TYPE=Release
+
+    # Compile the project
+    - name: Build Project
+      run: cmake --build build --config Release
+
+    # Upload the artifacts. 
+    # Paths cover both MSVC (Windows puts binaries in /Release) and GCC/Clang (Linux puts them in root build dir)
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        if-no-files-found: ignore
+        path: |
+          build/Release/HomeTranslator.exe
+          build/HomeTranslator
+          build/infer.dll
+          build/libinfer.so
+          build/models/
