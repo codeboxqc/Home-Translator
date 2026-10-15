@@ -81,7 +81,7 @@ endif()
 
 # --- Project Sources ---
 set(APP_SOURCES
-    "HomeTranslator.cpp"
+    "Home Translator.cpp"  
     "ai_engine.cpp"
     "app_ui.cpp"
     "doc_parser.cpp"
