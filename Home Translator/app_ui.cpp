@@ -1,6 +1,7 @@
+
 /* ========================================================================== */
 /* app_ui.cpp                                                                 */
-/* Full UI implementation with Auto-Corrector & Chunk Progress Bar            */
+/* Full UI implementation with Layout Mode & Flashing libinfer Link           */
 /* ========================================================================== */
 #include "app_ui.h"
 
@@ -17,7 +18,7 @@ namespace fs = std::filesystem;
 namespace {
     struct InputTextCallback_UserData {
         std::string* Str;
-        ImGuiInputTextCallback  ChainCallback;
+        ImGuiInputTextCallback ChainCallback;
         void* ChainCallbackUserData;
     };
 
@@ -91,7 +92,7 @@ namespace {
         std::string cmd = "open \"" + url + "\"";
         std::system(cmd.c_str());
 #else
-        std::string cmd = "xdg-open \"" + url + "\" &";
+        std::string cmd = "xdg-open \"" + url + "\" > /dev/null 2>&1 &";
         std::system(cmd.c_str());
 #endif
     }
@@ -112,7 +113,7 @@ AppUI::AppUI(AIEngine* engine) : m_engine(engine) {
     }
     else {
         m_show_download_modal = false;
-        m_status_msg = "All models present. Auto-loading default model...";
+        m_status_msg = "All models present. Ready.";
         m_status_is_error = false;
     }
 
@@ -122,6 +123,15 @@ AppUI::AppUI(AIEngine* engine) : m_engine(engine) {
 }
 
 AppUI::~AppUI() {}
+
+void AppUI::apply_layout_directive() {
+    m_custom_directive =
+        "Apply professional book and text layout formatting:\n"
+        "1. Structure into logical, readable paragraphs.\n"
+        "2. Ensure proper sentence-start capitalization.\n"
+        "3. Standardize punctuation (periods, commas, em-dashes for dialogs).\n"
+        "4. Preserve original story, meaning, and voice 100% faithfully.";
+}
 
 void AppUI::scan_available_models() {
     m_available_models.clear();
@@ -155,6 +165,7 @@ const std::vector<std::string>& AppUI::get_active_model_supported_languages() co
         "Italian (Italien)", "Portuguese (Portugais)", "Hindi", "Thai (Thaï)"
     };
 
+    // Lao and Khmer cleanly deleted; Burmese preserved
     static const std::vector<std::string> qwen25_langs = {
         "English", "French (Français)", "Spanish (Espagnol)", "German (Allemand)",
         "Italian (Italien)", "Portuguese (Portugais)", "Dutch (Néerlandais)", "Russian (Russe)",
@@ -162,9 +173,10 @@ const std::vector<std::string>& AppUI::get_active_model_supported_languages() co
         "Persian (Farsi)", "Hebrew (Hébreu)", "Chinese (Chinois)", "Japanese (Japonais)",
         "Korean (Coréen)", "Hindi", "Bengali", "Urdu", "Vietnamese (Vietnamien)",
         "Thai (Thaï)", "Indonesian (Indonésien)", "Malay (Malais)", "Tagalog (Filipino)",
-        "Khmer", "Lao", "Burmese", "Cebuano"
+        "Burmese", "Cebuano"
     };
 
+    // Lao and Khmer cleanly deleted; Burmese preserved
     static const std::vector<std::string> qwen3_langs = {
         "English", "French (Français)", "Spanish (Espagnol)", "German (Allemand)",
         "Italian (Italien)", "Portuguese (Portugais)", "Dutch (Néerlandais)", "Russian (Russe)",
@@ -172,7 +184,7 @@ const std::vector<std::string>& AppUI::get_active_model_supported_languages() co
         "Persian (Farsi)", "Hebrew (Hébreu)", "Chinese (Chinois)", "Japanese (Japonais)",
         "Korean (Coréen)", "Hindi", "Bengali", "Urdu", "Vietnamese (Vietnamien)",
         "Thai (Thaï)", "Indonesian (Indonésien)", "Malay (Malais)", "Tagalog (Filipino)",
-        "Khmer", "Lao", "Burmese", "Cebuano", "Swedish (Suédois)", "Danish (Danois)",
+        "Burmese", "Cebuano", "Swedish (Suédois)", "Danish (Danois)",
         "Norwegian (Norvégien)", "Finnish (Finnois)", "Greek (Grec)", "Slovak (Slovaque)",
         "Hungarian (Hongrois)", "Romanian (Roumain)", "Bulgarian (Bulgare)", "Ukrainian (Ukrainien)",
         "Serbian (Serbe)", "Croatian (Croate)", "Lithuanian (Lituanien)", "Latvian (Letton)",
@@ -244,10 +256,22 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
 }
 
 void AppUI::render() {
-    if (m_engine->get_output_text_if_dirty(m_output_text, m_output_revision)) {
+    double now = ImGui::GetTime();
+    bool output_updated = m_engine->get_output_text_if_dirty(m_output_text, m_output_revision);
+
+    if (output_updated) {
+        m_cached_output_chars = m_output_text.size();
+        // Throttled word counting prevents UI frame stutter during high-speed token generation
+        if (!m_engine->is_generating() || (now - m_last_word_count_time > 0.25)) {
+            m_cached_output_words = count_words(m_output_text);
+            m_last_word_count_time = now;
+        }
+    }
+    else if (!m_engine->is_generating() && m_was_generating) {
         m_cached_output_words = count_words(m_output_text);
         m_cached_output_chars = m_output_text.size();
     }
+    m_was_generating = m_engine->is_generating();
 
     if (m_input_text.size() != m_last_input_size) {
         m_cached_input_words = count_words(m_input_text);
@@ -289,11 +313,11 @@ void AppUI::render() {
 
 void AppUI::render_donation_button() {
     double t = ImGui::GetTime();
-    float pulse = (static_cast<float>(std::sin(t * 6.0)) + 1.0f) * 0.5f;
+    float pulse = (static_cast<float>(std::sin(t * 5.0)) + 1.0f) * 0.5f;
 
-    ImVec4 col_button = ImVec4(1.0f, 0.4f + 0.25f * pulse, 0.0f, 1.0f);
-    ImVec4 col_button_hover = ImVec4(1.0f, 0.6f + 0.25f * pulse, 0.2f, 1.0f);
-    ImVec4 col_button_active = ImVec4(0.85f, 0.3f, 0.0f, 1.0f);
+    ImVec4 col_button = ImVec4(0.85f, 0.45f + 0.20f * pulse, 0.10f, 1.0f);
+    ImVec4 col_button_hover = ImVec4(0.95f, 0.55f + 0.20f * pulse, 0.20f, 1.0f);
+    ImVec4 col_button_active = ImVec4(0.75f, 0.35f, 0.05f, 1.0f);
 
     ImGui::PushStyleColor(ImGuiCol_Button, col_button);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col_button_hover);
@@ -330,15 +354,15 @@ void AppUI::render_progress_and_cancel_bar() {
 
     float avail_w = ImGui::GetContentRegionAvail().x - 170.0f;
 
-    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.6f + 0.3f * pulse, 0.9f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.20f, 0.60f + 0.30f * pulse, 0.95f, 1.0f));
     ImGui::ProgressBar(tot_chunks > 1 ? chunk_pct : -1.0f, ImVec2(avail_w, 32.0f), progress_str);
     ImGui::PopStyleColor();
 
     ImGui::SameLine(0, 10.0f);
 
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.18f, 0.18f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.98f, 0.28f, 0.28f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.70f, 0.12f, 0.12f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.82f, 0.20f, 0.20f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.28f, 0.28f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.68f, 0.14f, 0.14f, 1.0f));
 
     if (ImGui::Button(" CANCEL / STOP ", ImVec2(150, 32))) {
         m_engine->abort();
@@ -358,7 +382,7 @@ void AppUI::render_download_modal() {
         const auto& presets = ModelDownloader::get_presets();
         int installed_count = count_installed_official_presets();
 
-        ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "AI Model Management & Download Menu");
+        ImGui::TextColored(ImVec4(0.24f, 0.72f, 1.0f, 1.0f), "AI Model Management & Download Menu");
         ImGui::TextWrapped("Download missing models below. When downloaded, models will auto-load automatically.");
         ImGui::Separator();
         ImGui::Spacing();
@@ -376,7 +400,7 @@ void AppUI::render_download_modal() {
             ImGui::SameLine(ImGui::GetWindowWidth() - 180.0f);
 
             if (installed) {
-                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "[ Installed ]");
+                ImGui::TextColored(ImVec4(0.24f, 0.85f, 0.40f, 1.0f), "[ Installed ]");
             }
             else if (downloading) {
                 ImGui::BeginDisabled();
@@ -423,7 +447,7 @@ void AppUI::render_download_modal() {
         ImGui::Separator();
 
         if (installed_count == 3) {
-            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "All 3 official models are installed!");
+            ImGui::TextColored(ImVec4(0.24f, 0.85f, 0.40f, 1.0f), "All 3 official models are installed!");
             ImGui::SameLine(ImGui::GetWindowWidth() - 210.0f);
             if (ImGui::Button("Start Application", ImVec2(190, 36))) {
                 m_show_download_modal = false;
@@ -449,9 +473,34 @@ void AppUI::render_download_modal() {
 }
 
 void AppUI::render_header_panel() {
-    ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "Local AI Translation & Orthography Tool");
+    ImGui::TextColored(ImVec4(0.25f, 0.75f, 1.0f, 1.0f), "Local AI Translation & Orthography Tool");
     ImGui::SameLine();
-    ImGui::TextDisabled("(SDL3 + ImGui + OpenGL3 + libinfer)");
+    ImGui::TextDisabled("(SDL3 + ImGui + OpenGL3 + ");
+    ImGui::SameLine(0.0f, 0.0f);
+
+    // Flashing and clickable libinfer link
+    double cur_time = ImGui::GetTime();
+    float flash_t = (static_cast<float>(std::sin(cur_time * 5.0)) + 1.0f) * 0.5f;
+    ImVec4 libinfer_col = ImVec4(
+        0.20f + 0.70f * flash_t,
+        0.65f + 0.35f * (1.0f - flash_t),
+        1.00f,
+        1.00f
+    );
+
+    ImGui::PushStyleColor(ImGuiCol_Text, libinfer_col);
+    ImGui::TextUnformatted("libinfer");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetTooltip("Visit libinfer on GitHub: https://github.com/codeboxqc/libinfer\n(Click to open link)");
+    }
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+        open_url("https://github.com/codeboxqc/libinfer");
+    }
+    ImGui::PopStyleColor();
+
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::TextDisabled(")");
 
     render_donation_button();
 
@@ -500,7 +549,7 @@ void AppUI::render_header_panel() {
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[LOADING MODEL...]");
     }
     else if (m_engine->is_model_loaded()) {
-        ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "[Model Ready]");
+        ImGui::TextColored(ImVec4(0.24f, 0.85f, 0.40f, 1.0f), "[Model Ready]");
     }
     else {
         ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.2f, 1.0f), "[No Model]");
@@ -547,50 +596,89 @@ void AppUI::render_controls_panel() {
         }
     }
 
-    // USER DIRECTIVE / PROMPT INSTRUCTIONS SECTION
+    // DIRECTIVE / INSTRUCTIONS
     ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "AI Directive / Custom Instructions (Optional):");
+    ImGui::TextColored(ImVec4(0.35f, 0.78f, 1.0f, 1.0f), "AI Directive / Instructions (Optional):");
     ImGui::SameLine();
-    ImGui::TextDisabled("(Direct AI style, tone, terminology, or constraints)");
+    ImGui::TextDisabled("(Set custom style, tone, or formatting constraints)");
 
     float avail_width = ImGui::GetContentRegionAvail().x;
-    float buttons_width = 300.0f;
-    float input_width = std::max(220.0f, avail_width - buttons_width);
+    float buttons_width = 440.0f;
+    float input_width = std::max(200.0f, avail_width - buttons_width);
 
     ImGui::PushItemWidth(input_width);
     InputTextWithHintStdString(
         "##CustomDirective",
-        "e.g. 'Use formal tone', 'Keep technical terms in English', 'Only correct punctuation'...",
+        "e.g. 'Use formal tone', 'Keep code blocks verbatim'...",
         &m_custom_directive
     );
     ImGui::PopItemWidth();
 
+    // QUICK PROMPT DIRECTIVE BUTTONS
     ImGui::SameLine(0, 8.0f);
-    if (ImGui::Button("Formal", ImVec2(65, 0))) {
+    if (ImGui::Button("Formal", ImVec2(60, 0))) {
         m_custom_directive = "Use a formal, polite, and professional tone throughout.";
     }
     ImGui::SameLine(0, 4.0f);
-    if (ImGui::Button("Casual", ImVec2(65, 0))) {
+    if (ImGui::Button("Casual", ImVec2(60, 0))) {
         m_custom_directive = "Use a natural, conversational, and casual tone.";
     }
     ImGui::SameLine(0, 4.0f);
-    if (ImGui::Button("Technical", ImVec2(80, 0))) {
+    if (ImGui::Button("Technical", ImVec2(75, 0))) {
         m_custom_directive = "Preserve all technical terminology, acronyms, and code identifiers verbatim.";
     }
+
+    // Book layout directive preset
     ImGui::SameLine(0, 4.0f);
-    if (ImGui::Button("Clear", ImVec2(55, 0))) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.40f, 0.22f, 0.68f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.50f, 0.30f, 0.80f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.32f, 0.16f, 0.55f, 1.0f));
+    if (ImGui::Button("Book Layout", ImVec2(100, 0))) {
+        apply_layout_directive();
+        m_layout_formatting = true;
+        m_status_msg = "Book layout directive applied!";
+        m_status_is_error = false;
+    }
+    ImGui::PopStyleColor(3);
+
+    ImGui::SameLine(0, 4.0f);
+    if (ImGui::Button("Clear", ImVec2(50, 0))) {
         m_custom_directive.clear();
     }
     ImGui::Spacing();
 
-    // ACTION BUTTONS SECTION
+    // TOGGLE 1: AUTO-CORRECT TYPOS ON TRANSLATION
+    ImGui::Checkbox(" Auto-Correct Typos on Translation", &m_auto_correct_on_translate);
+    ImGui::SameLine();
+    if (m_auto_correct_on_translate) {
+        ImGui::TextColored(ImVec4(0.24f, 0.85f, 0.40f, 1.0f), "[ON: Typos Fixed During Translation]");
+    }
+    else {
+        ImGui::TextColored(ImVec4(0.92f, 0.65f, 0.25f, 1.0f), "[OFF / BYPASS: Literal translation, preserves original typos]");
+    }
+
+    ImGui::SameLine(0, 25.0f);
+
+    // TOGGLE 2: LAYOUT FORMATTING (REPLACING MISE EN PAGE)
+    ImGui::Checkbox(" Layout Formatting", &m_layout_formatting);
+    ImGui::SameLine();
+    if (m_layout_formatting) {
+        ImGui::TextColored(ImVec4(0.24f, 0.85f, 0.40f, 1.0f), "[ON: Layout Text (Structured Paragraphs & Dialogues)]");
+    }
+    else {
+        ImGui::TextColored(ImVec4(0.92f, 0.65f, 0.25f, 1.0f), "[OFF / BYPASS: Keep Raw Layout Verbatim]");
+    }
+
+    ImGui::Spacing();
+
+    // ACTION BUTTONS SECTION (WITH ROUNDED COLOR THEMES)
     bool generating = m_engine->is_generating();
     bool loading_model = m_engine->is_loading_model();
 
     if (generating) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.18f, 0.18f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.98f, 0.28f, 0.28f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.70f, 0.12f, 0.12f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.82f, 0.20f, 0.20f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.28f, 0.28f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.68f, 0.14f, 0.14f, 1.0f));
         if (ImGui::Button(" STOP / CANCEL ", ImVec2(150, 36))) {
             m_engine->abort();
             m_status_msg = "Abort requested.";
@@ -601,12 +689,12 @@ void AppUI::render_controls_panel() {
     else {
         if (!m_engine->is_model_loaded() || loading_model) ImGui::BeginDisabled();
 
-        // TRANSLATE BUTTON
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.18f, 0.18f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.98f, 0.28f, 0.28f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.70f, 0.12f, 0.12f, 1.0f));
+        // 1. TRANSLATE BUTTON (Emerald Theme)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.55f, 0.40f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.68f, 0.50f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.09f, 0.45f, 0.32f, 1.0f));
 
-        if (ImGui::Button(" TRANSLATE ", ImVec2(150, 36))) {
+        if (ImGui::Button(" TRANSLATE ", ImVec2(140, 36))) {
             if (m_input_source_idx == 1) {
                 const char* clipboard_text = ImGui::GetClipboardText();
                 if (clipboard_text && std::strlen(clipboard_text) > 0) {
@@ -623,8 +711,12 @@ void AppUI::render_controls_panel() {
                 std::string in_lang = active_langs[m_in_lang_idx];
                 std::string out_lang = active_langs[m_out_lang_idx];
 
-                if (m_engine->start_translation_task(in_lang, out_lang, m_input_text, m_custom_directive)) {
-                    m_status_msg = "Translating " + in_lang + " to " + out_lang + "...";
+                if (m_engine->start_translation_task(
+                    in_lang, out_lang, m_input_text, m_custom_directive,
+                    m_auto_correct_on_translate, m_layout_formatting)) {
+                    std::string mode_str = m_auto_correct_on_translate ? " (Auto-Correct Typos)" : " (Bypassing Typo Fixes)";
+                    if (m_layout_formatting) mode_str += " + (Layout Mode)";
+                    m_status_msg = "Translating " + in_lang + " to " + out_lang + mode_str + "...";
                     m_status_is_error = false;
                 }
                 else {
@@ -635,14 +727,14 @@ void AppUI::render_controls_panel() {
         }
         ImGui::PopStyleColor(3);
 
-        ImGui::SameLine(0, 12.0f);
+        ImGui::SameLine(0, 10.0f);
 
-        // AUTO-CORRECT TYPOS BUTTON
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.60f, 0.85f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.70f, 0.98f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.48f, 0.70f, 1.0f));
+        // 2. AUTO-CORRECT TYPOS BUTTON (Sapphire Theme)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.48f, 0.82f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.58f, 0.96f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.11f, 0.38f, 0.68f, 1.0f));
 
-        if (ImGui::Button(" AUTO-CORRECT TYPOS ", ImVec2(200, 36))) {
+        if (ImGui::Button(" AUTO-CORRECT TYPOS ", ImVec2(185, 36))) {
             if (m_input_source_idx == 1) {
                 const char* clipboard_text = ImGui::GetClipboardText();
                 if (clipboard_text && std::strlen(clipboard_text) > 0) {
@@ -654,8 +746,8 @@ void AppUI::render_controls_panel() {
                 const auto& active_langs = get_active_model_supported_languages();
                 std::string in_lang = active_langs[m_in_lang_idx];
 
-                if (m_engine->start_auto_correct_task(in_lang, m_input_text, m_custom_directive)) {
-                    m_status_msg = "Fixing typos & grammar in " + in_lang + "...";
+                if (m_engine->start_auto_correct_task(in_lang, m_input_text, m_custom_directive, m_layout_formatting)) {
+                    m_status_msg = "Fixing typos & grammar in " + in_lang + (m_layout_formatting ? " with layout..." : "...");
                     m_status_is_error = false;
                 }
                 else {
@@ -666,16 +758,57 @@ void AppUI::render_controls_panel() {
         }
         ImGui::PopStyleColor(3);
 
-        ImGui::SameLine(0, 12.0f);
+        ImGui::SameLine(0, 10.0f);
 
-        if (ImGui::Button("Retry Mistake", ImVec2(130, 36))) {
+        // 3. FORMAT LAYOUT BUTTON (Replaces "Mise en page livre" - Amethyst Theme)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.44f, 0.24f, 0.72f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.32f, 0.88f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.35f, 0.18f, 0.58f, 1.0f));
+
+        if (ImGui::Button(" FORMAT LAYOUT ", ImVec2(165, 36))) {
+            apply_layout_directive();
+            m_layout_formatting = true;
+
+            if (m_input_source_idx == 1) {
+                const char* clipboard_text = ImGui::GetClipboardText();
+                if (clipboard_text && std::strlen(clipboard_text) > 0) {
+                    m_input_text = clipboard_text;
+                }
+            }
+
+            if (!m_input_text.empty()) {
+                const auto& active_langs = get_active_model_supported_languages();
+                std::string in_lang = active_langs[m_in_lang_idx];
+
+                if (m_engine->start_auto_correct_task(in_lang, m_input_text, m_custom_directive, true)) {
+                    m_status_msg = "Restructuring paragraphs and formatting layout...";
+                    m_status_is_error = false;
+                }
+                else {
+                    m_status_msg = m_engine->get_last_error();
+                    m_status_is_error = true;
+                }
+            }
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 10.0f);
+
+        // 4. RETRY BUTTON (Slate Theme)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.26f, 0.36f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.35f, 0.48f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.16f, 0.20f, 0.28f, 1.0f));
+
+        if (ImGui::Button("Retry Mistake", ImVec2(120, 36))) {
             m_engine->clear_output_text();
             m_output_text.clear();
             const auto& active_langs = get_active_model_supported_languages();
             std::string in_lang = active_langs[m_in_lang_idx];
             std::string out_lang = active_langs[m_out_lang_idx];
 
-            if (m_engine->start_translation_task(in_lang, out_lang, m_input_text, m_custom_directive)) {
+            if (m_engine->start_translation_task(
+                in_lang, out_lang, m_input_text, m_custom_directive,
+                m_auto_correct_on_translate, m_layout_formatting)) {
                 m_status_msg = "Retrying generation...";
                 m_status_is_error = false;
             }
@@ -684,12 +817,17 @@ void AppUI::render_controls_panel() {
                 m_status_is_error = true;
             }
         }
+        ImGui::PopStyleColor(3);
 
         if (!m_engine->is_model_loaded() || loading_model) ImGui::EndDisabled();
     }
 
-    ImGui::SameLine(0, 12.0f);
-    if (ImGui::Button("Clear All", ImVec2(90, 36))) {
+    ImGui::SameLine(0, 10.0f);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.26f, 0.30f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f, 0.36f, 0.42f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.18f, 0.19f, 0.22f, 1.0f));
+
+    if (ImGui::Button("Clear All", ImVec2(85, 36))) {
         m_input_text.clear();
         m_engine->clear_output_text();
         m_output_text.clear();
@@ -701,6 +839,7 @@ void AppUI::render_controls_panel() {
         m_status_msg = "Cleared editors.";
         m_status_is_error = false;
     }
+    ImGui::PopStyleColor(3);
 }
 
 void AppUI::render_text_editors_panel() {
@@ -756,14 +895,14 @@ void AppUI::render_status_bar() {
         ImGui::SameLine();
     }
     else if (m_engine->is_generating()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[PROCESSING...]");
+        ImGui::TextColored(ImVec4(0.24f, 0.72f, 1.0f, 1.0f), "[PROCESSING...]");
         ImGui::SameLine();
     }
 
     if (m_status_is_error) {
-        ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "Error: %s", m_status_msg.c_str());
+        ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "Error: %s", m_status_msg.c_str());
     }
     else {
-        ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "Status: %s", m_status_msg.c_str());
+        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "Status: %s", m_status_msg.c_str());
     }
 }

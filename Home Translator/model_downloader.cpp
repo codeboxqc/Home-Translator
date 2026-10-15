@@ -1,6 +1,6 @@
 /* ========================================================================== */
 /* model_downloader.cpp                                                       */
-/* High-Throughput Buffered libcurl Downloader                                */
+/* High-Throughput Buffered libcurl Downloader with Speed Metric              */
 /* ========================================================================== */
 #include "model_downloader.h"
 
@@ -22,7 +22,7 @@ namespace {
         size_t total_size = size * nmemb;
         out->write(static_cast<const char*>(ptr), total_size);
         if (!out->good()) {
-            return 0; // Signal write failure to abort curl safely
+            return 0; // Abort curl safely if disk write fails
         }
         return total_size;
     }
@@ -83,13 +83,13 @@ const std::vector<ModelPreset>& ModelDownloader::get_presets() {
             "Qwen 2.5 7B Instruct (Q4_K_M)",
             "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
             "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf?download=true",
-            "4.68 GB - Native support for 29 languages with exceptional translation accuracy."
+            "4.68 GB - Native support for 27 languages with exceptional translation accuracy."
         },
         {
             "Qwen 3 8B (Q4_K_M)",
             "Qwen3-8B-Q4_K_M.gguf",
             "https://huggingface.co/SandLogicTechnologies/Qwen3-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf?download=true",
-            "5.20 GB - Next-generation architecture with native support for 119 languages."
+            "5.20 GB - Next-generation architecture with native support for 117 languages."
         },
         {
             "Llama 3.2 3B Instruct (Q8_0)",
@@ -116,6 +116,7 @@ bool ModelDownloader::start_download(const ModelPreset& preset) {
     m_progress.store(0.001f);
     m_bytes_downloaded = 0;
     m_bytes_total = 0;
+    m_start_time = std::chrono::steady_clock::now();
 
     {
         std::lock_guard<std::mutex> lock(m_status_mutex);
@@ -146,8 +147,16 @@ void ModelDownloader::update_progress(uint64_t dlnow, uint64_t dltotal) {
         m_progress.store(pct);
     }
 
+    auto now = std::chrono::steady_clock::now();
+    double elapsed_sec = std::chrono::duration<double>(now - m_start_time).count();
+    double speed_mb_s = (elapsed_sec > 0.1) ? (static_cast<double>(dlnow) / (1024.0 * 1024.0) / elapsed_sec) : 0.0;
+
+    std::ostringstream oss;
+    oss << "Downloading: " << format_bytes(dlnow) << " / " << format_bytes(dltotal)
+        << " (" << std::fixed << std::setprecision(1) << speed_mb_s << " MB/s)";
+
     std::lock_guard<std::mutex> lock(m_status_mutex);
-    m_status_message = "Downloading: " + format_bytes(dlnow) + " / " + format_bytes(dltotal);
+    m_status_message = oss.str();
 }
 
 void ModelDownloader::download_thread_proc(ModelPreset preset) {
@@ -163,8 +172,8 @@ void ModelDownloader::download_thread_proc(ModelPreset preset) {
         return;
     }
 
-    // 1 MB disk buffer to dramatically accelerate multi-gigabyte GGUF file downloads
-    std::vector<char> disk_io_buffer(1024 * 1024);
+    // 2 MB high-throughput disk buffer
+    std::vector<char> disk_io_buffer(2 * 1024 * 1024);
     out_file.rdbuf()->pubsetbuf(disk_io_buffer.data(), disk_io_buffer.size());
 
     CURL* curl = curl_easy_init();
@@ -184,7 +193,7 @@ void ModelDownloader::download_thread_proc(ModelPreset preset) {
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_xferinfo_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, this);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "HomeTranslator/1.0");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "HomeTranslator/2.0");
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);

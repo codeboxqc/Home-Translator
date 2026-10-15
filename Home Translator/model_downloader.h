@@ -1,11 +1,12 @@
 /* ========================================================================== */
 /* model_downloader.h                                                         */
-/* Native C++ libcurl Async Model Downloader                                 */
+/* Native C++ libcurl Async Model Downloader with Progress Tracking           */
 /* ========================================================================== */
 #ifndef MODEL_DOWNLOADER_H
 #define MODEL_DOWNLOADER_H
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -49,6 +50,7 @@ private:
 
     uint64_t m_bytes_downloaded{ 0 };
     uint64_t m_bytes_total{ 0 };
+    std::chrono::steady_clock::time_point m_start_time;
 
     mutable std::mutex m_status_mutex;
     std::string m_status_message;

@@ -1,6 +1,7 @@
 ﻿/* ========================================================================== */
 /* Home Translator.cpp                                                        */
-/* Complete Font Support: Hindi, Bengali, Korean, Hebrew, Arabic, Persian, etc*/
+/* Multi-Script Fonts (Fixed Burmese, Hindi, Arabic, Korean, CJK)             */
+/* Cyber Obsidian Dark Theme & Smooth Rounded UI                             */
 /* ========================================================================== */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <stdint.h>
 
 namespace fs = std::filesystem;
 
@@ -54,11 +56,10 @@ namespace {
         return false;
     }
 
-    // Comprehensive font loader covering Hindi, Bengali, Korean, Arabic, Persian, Hebrew, Thai, CJK
+    // Comprehensive font loader covering Burmese, Hindi, Bengali, Korean, Arabic, Persian, Hebrew, Thai, CJK
     void setup_unicode_fonts(ImGuiIO& io) {
-        constexpr float FONT_SIZE = 22.0f;
+        constexpr float FONT_SIZE = 20.0f;
 
-        // 1x oversample keeps 35,000+ glyph atlas within GPU texture limits
         ImFontConfig base_cfg;
         base_cfg.OversampleH = 1;
         base_cfg.OversampleV = 1;
@@ -67,12 +68,12 @@ namespace {
         ImFontConfig merge_cfg = base_cfg;
         merge_cfg.MergeMode = true;
 
-        // 1. Latin, Cyrillic, Greek, Punctuation (includes ZWNJ 0x200C and ZWJ 0x200D)
+        // 1. Latin, Cyrillic, Greek, Punctuation
         static const ImWchar latin_ranges[] = {
             0x0020, 0x024F, // Basic Latin + Latin Supplement + Extended-A & B
             0x0370, 0x052F, // Greek + Cyrillic
             0x1E00, 0x1EFF, // Latin Extended Additional
-            0x2000, 0x206F, // General Punctuation (ZWNJ / ZWJ for Arabic/Indic)
+            0x2000, 0x206F, // General Punctuation (ZWNJ / ZWJ)
             0x2070, 0x209F, // Superscripts / Subscripts
             0x20A0, 0x20CF, // Currency Symbols
             0
@@ -99,17 +100,17 @@ namespace {
             0x1100, 0x11FF, // Hangul Jamo
             0x3130, 0x318F, // Hangul Compatibility Jamo
             0xA960, 0xA97F, // Hangul Jamo Extended-A
-            0xAC00, 0xD7AF, // Complete 11,172 modern Hangul syllables
+            0xAC00, 0xD7AF, // Modern Hangul syllables
             0xD7B0, 0xD7FF, // Hangul Jamo Extended-B
             0
         };
 
-        // 4. Arabic and Persian / Farsi (includes گ, چ, پ, ژ, ک, ی) & Urdu
+        // 4. Arabic and Persian / Farsi & Urdu
         static const ImWchar arabic_persian_ranges[] = {
             0x0600, 0x06FF, // Basic Arabic & Persian letters
             0x0750, 0x077F, // Arabic Supplement
             0x08A0, 0x08FF, // Arabic Extended-A
-            0xFB50, 0xFDFF, // Arabic Presentation Forms-A (contextual shapes & ligatures)
+            0xFB50, 0xFDFF, // Arabic Presentation Forms-A
             0xFE70, 0xFEFF, // Arabic Presentation Forms-B
             0
         };
@@ -121,14 +122,21 @@ namespace {
             0
         };
 
-        // 6. Thai & Lao
-        static const ImWchar thai_lao_ranges[] = {
+        // 6. Thai (Lao deleted as requested)
+        static const ImWchar thai_ranges[] = {
             0x0E00, 0x0E7F, // Thai
-            0x0E80, 0x0EFF, // Lao
             0
         };
 
-        // 7. CJK Unified (Chinese & Japanese Kana)
+        // 7. Myanmar / Burmese (Dedicated fix for ????)
+        static const ImWchar myanmar_ranges[] = {
+            0x1000, 0x109F, // Myanmar (Burmese standard block)
+            0xA9E0, 0xA9FF, // Myanmar Extended-B
+            0xAA60, 0xAA7F, // Myanmar Extended-A
+            0
+        };
+
+        // 8. CJK Unified (Chinese & Japanese Kana)
         static const ImWchar cjk_ranges[] = {
             0x3000, 0x303F, // CJK Symbols and Punctuation
             0x3040, 0x309F, // Hiragana
@@ -138,12 +146,12 @@ namespace {
             0
         };
 
-        // 8. Other Scripts (Georgian, Armenian, Myanmar, Ethiopic, Khmer)
+        // 9. Other Scripts (Georgian, Armenian, Ethiopic - Khmer deleted as requested)
         static const ImWchar other_ranges[] = {
-            0x1000, 0x109F, // Myanmar
             0x10A0, 0x10FF, // Georgian
             0x1200, 0x137F, // Ethiopic
-            0x1780, 0x17FF, // Khmer
+            0x0530, 0x058F, // Armenian
+            0xFB13, 0xFB17, // Armenian Ligatures
             0
         };
 
@@ -152,33 +160,33 @@ namespace {
         const std::vector<std::string> base_fonts = {
             "C:\\Windows\\Fonts\\segoeui.ttf",
             "C:\\Windows\\Fonts\\arial.ttf",
-            "C:\\Windows\\Fonts\\tahoma.ttf"
+            "C:\\Windows\\Fonts\\tahoma.ttf",
+            "fonts/segoeui.ttf"
         };
         bool loaded = try_load_font(io, base_fonts, FONT_SIZE, &base_cfg, latin_ranges);
 
-        // 2. Merge Indic (Nirmala UI covers Hindi, Bengali, Marathi, Nepali, Tamil, etc.)
+        // 2. Merge Indic (Nirmala UI)
         const std::vector<std::string> indic_fonts = {
-            "C:\\Windows\\Fonts\\nirmala.ttf", // Windows 8/10/11 master Indic font
-            "C:\\Windows\\Fonts\\mangal.ttf",  // Devanagari fallback
-            "C:\\Windows\\Fonts\\vrinda.ttf",  // Bengali fallback
-            "C:\\Windows\\Fonts\\shonar.ttf"
+            "C:\\Windows\\Fonts\\nirmala.ttf",
+            "C:\\Windows\\Fonts\\mangal.ttf",
+            "C:\\Windows\\Fonts\\vrinda.ttf",
+            "fonts/nirmala.ttf"
         };
         try_load_font(io, indic_fonts, FONT_SIZE, &merge_cfg, indic_ranges);
 
         // 3. Merge Korean (Malgun Gothic)
         const std::vector<std::string> korean_fonts = {
-            "C:\\Windows\\Fonts\\malgun.ttf",  // Standard Windows Korean font
+            "C:\\Windows\\Fonts\\malgun.ttf",
             "C:\\Windows\\Fonts\\gulim.ttc",
-            "C:\\Windows\\Fonts\\batang.ttc"
+            "fonts/malgun.ttf"
         };
         try_load_font(io, korean_fonts, FONT_SIZE, &merge_cfg, korean_ranges);
 
-        // 4. Merge Arabic & Persian / Farsi (Tahoma & Arial have complete Arabic/Farsi shaping)
+        // 4. Merge Arabic & Persian / Farsi
         const std::vector<std::string> arabic_fonts = {
             "C:\\Windows\\Fonts\\tahoma.ttf",
             "C:\\Windows\\Fonts\\arial.ttf",
-            "C:\\Windows\\Fonts\\seguiui.ttf",
-            "C:\\Windows\\Fonts\\times.ttf"
+            "C:\\Windows\\Fonts\\seguiui.ttf"
         };
         try_load_font(io, arabic_fonts, FONT_SIZE, &merge_cfg, arabic_persian_ranges);
 
@@ -186,47 +194,58 @@ namespace {
         const std::vector<std::string> hebrew_fonts = {
             "C:\\Windows\\Fonts\\tahoma.ttf",
             "C:\\Windows\\Fonts\\arial.ttf",
-            "C:\\Windows\\Fonts\\david.ttf",
-            "C:\\Windows\\Fonts\\gisha.ttf"
+            "C:\\Windows\\Fonts\\david.ttf"
         };
         try_load_font(io, hebrew_fonts, FONT_SIZE, &merge_cfg, hebrew_ranges);
 
-        // 6. Merge Thai & Lao
+        // 6. Merge Thai
         const std::vector<std::string> thai_fonts = {
             "C:\\Windows\\Fonts\\leelawad.ttf",
             "C:\\Windows\\Fonts\\LeelawUI.ttf",
             "C:\\Windows\\Fonts\\tahoma.ttf"
         };
-        try_load_font(io, thai_fonts, FONT_SIZE, &merge_cfg, thai_lao_ranges);
+        try_load_font(io, thai_fonts, FONT_SIZE, &merge_cfg, thai_ranges);
 
-        // 7. Merge CJK (Chinese & Japanese)
+        // 7. Merge Myanmar / Burmese (Windows mmrtext.ttf fix)
+        const std::vector<std::string> myanmar_fonts = {
+            "C:\\Windows\\Fonts\\mmrtext.ttf",
+            "C:\\Windows\\Fonts\\mmrtextb.ttf",
+            "C:\\Windows\\Fonts\\padauk.ttf",
+            "C:\\Windows\\Fonts\\pyidaungsu.ttf",
+            "fonts/mmrtext.ttf",
+            "fonts/NotoSansMyanmar-Regular.ttf"
+        };
+        try_load_font(io, myanmar_fonts, FONT_SIZE, &merge_cfg, myanmar_ranges);
+
+        // 8. Merge CJK (Chinese & Japanese)
         const std::vector<std::string> cjk_fonts = {
-            "C:\\Windows\\Fonts\\msyh.ttc",   // Microsoft YaHei
+            "C:\\Windows\\Fonts\\msyh.ttc",
             "C:\\Windows\\Fonts\\simsun.ttc",
-            "C:\\Windows\\Fonts\\meiryo.ttc",
-            "C:\\Windows\\Fonts\\msgothic.ttc"
+            "C:\\Windows\\Fonts\\meiryo.ttc"
         };
         try_load_font(io, cjk_fonts, FONT_SIZE, &merge_cfg, cjk_ranges);
 
-        // 8. Merge Georgian, Armenian & others
+        // 9. Merge Georgian, Armenian & Ethiopic
         const std::vector<std::string> other_fonts = {
-            "C:\\Windows\\Fonts\\sylfaen.ttf", // Sylfaen has Georgian & Armenian
-            "C:\\Windows\\Fonts\\khmer.ttf",
-            "C:\\Windows\\Fonts\\laoui.ttf"
+            "C:\\Windows\\Fonts\\sylfaen.ttf",
+            "C:\\Windows\\Fonts\\nyala.ttf"
         };
         try_load_font(io, other_fonts, FONT_SIZE, &merge_cfg, other_ranges);
 
 #else
-        // Linux / Unix fallback using Noto Sans family
+        // Linux / Unix fallback using Noto Sans & DejaVu
         const std::vector<std::string> base_fonts = {
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "fonts/NotoSans-Regular.ttf"
         };
         bool loaded = try_load_font(io, base_fonts, FONT_SIZE, &base_cfg, latin_ranges);
 
         const std::vector<std::string> indic_fonts = {
             "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf"
+            "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+            "fonts/NotoSansDevanagari-Regular.ttf"
         };
         try_load_font(io, indic_fonts, FONT_SIZE, &merge_cfg, indic_ranges);
 
@@ -251,18 +270,92 @@ namespace {
             "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
             "/usr/share/fonts/truetype/thai/Waree.ttf"
         };
-        try_load_font(io, thai_fonts, FONT_SIZE, &merge_cfg, thai_lao_ranges);
+        try_load_font(io, thai_fonts, FONT_SIZE, &merge_cfg, thai_ranges);
+
+        // Myanmar / Burmese on Linux
+        const std::vector<std::string> myanmar_fonts = {
+            "/usr/share/fonts/truetype/noto/NotoSansMyanmar-Regular.ttf",
+            "/usr/share/fonts/truetype/padauk/Padauk.ttf",
+            "/usr/share/fonts/truetype/padauk/Padauk-Regular.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansMyanmar-Regular.otf",
+            "fonts/NotoSansMyanmar-Regular.ttf"
+        };
+        try_load_font(io, myanmar_fonts, FONT_SIZE, &merge_cfg, myanmar_ranges);
 
         const std::vector<std::string> cjk_fonts = {
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
         };
         try_load_font(io, cjk_fonts, FONT_SIZE, &merge_cfg, cjk_ranges);
+
+        const std::vector<std::string> other_fonts = {
+            "/usr/share/fonts/truetype/noto/NotoSansGeorgian-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansArmenian-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansEthiopic-Regular.ttf"
+        };
+        try_load_font(io, other_fonts, FONT_SIZE, &merge_cfg, other_ranges);
 #endif
 
         if (!loaded) {
             base_cfg.SizePixels = FONT_SIZE;
             io.Fonts->AddFontDefault(&base_cfg);
         }
+    }
+
+    // Modern Cyber Obsidian Dark Slate Theme with Rounded Geometry
+    void setup_modern_theme() {
+        ImGuiStyle& style = ImGui::GetStyle();
+        style.WindowRounding = 10.0f;
+        style.ChildRounding = 8.0f;
+        style.FrameRounding = 8.0f; // Smooth round buttons & inputs
+        style.PopupRounding = 8.0f;
+        style.ScrollbarRounding = 9.0f;
+        style.GrabRounding = 6.0f;
+        style.TabRounding = 6.0f;
+        style.FrameBorderSize = 1.0f;
+        style.WindowBorderSize = 1.0f;
+        style.FramePadding = ImVec2(10.0f, 7.0f);
+        style.ItemSpacing = ImVec2(10.0f, 8.0f);
+        style.ScrollbarSize = 16.0f;
+
+        ImVec4* colors = style.Colors;
+        colors[ImGuiCol_Text] = ImVec4(0.92f, 0.94f, 0.98f, 1.00f);
+        colors[ImGuiCol_TextDisabled] = ImVec4(0.50f, 0.55f, 0.65f, 1.00f);
+        colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.09f, 0.12f, 1.00f);
+        colors[ImGuiCol_ChildBg] = ImVec4(0.10f, 0.12f, 0.16f, 0.85f);
+        colors[ImGuiCol_PopupBg] = ImVec4(0.10f, 0.12f, 0.16f, 0.98f);
+        colors[ImGuiCol_Border] = ImVec4(0.18f, 0.22f, 0.30f, 0.70f);
+        colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+        colors[ImGuiCol_FrameBg] = ImVec4(0.13f, 0.16f, 0.22f, 0.80f);
+        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.23f, 0.32f, 1.00f);
+        colors[ImGuiCol_FrameBgActive] = ImVec4(0.22f, 0.28f, 0.38f, 1.00f);
+        colors[ImGuiCol_TitleBg] = ImVec4(0.08f, 0.09f, 0.12f, 1.00f);
+        colors[ImGuiCol_TitleBgActive] = ImVec4(0.11f, 0.14f, 0.19f, 1.00f);
+        colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.08f, 0.09f, 0.12f, 0.75f);
+        colors[ImGuiCol_MenuBarBg] = ImVec4(0.10f, 0.12f, 0.16f, 1.00f);
+        colors[ImGuiCol_ScrollbarBg] = ImVec4(0.07f, 0.08f, 0.10f, 0.50f);
+        colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.20f, 0.26f, 0.36f, 0.80f);
+        colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.26f, 0.34f, 0.48f, 1.00f);
+        colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.32f, 0.42f, 0.58f, 1.00f);
+        colors[ImGuiCol_CheckMark] = ImVec4(0.24f, 0.85f, 0.58f, 1.00f);
+        colors[ImGuiCol_SliderGrab] = ImVec4(0.26f, 0.65f, 0.95f, 0.90f);
+        colors[ImGuiCol_SliderGrabActive] = ImVec4(0.35f, 0.75f, 1.00f, 1.00f);
+        colors[ImGuiCol_Button] = ImVec4(0.15f, 0.20f, 0.28f, 0.90f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.29f, 0.40f, 1.00f);
+        colors[ImGuiCol_ButtonActive] = ImVec4(0.28f, 0.37f, 0.52f, 1.00f);
+        colors[ImGuiCol_Header] = ImVec4(0.15f, 0.21f, 0.30f, 0.80f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.22f, 0.30f, 0.44f, 0.90f);
+        colors[ImGuiCol_HeaderActive] = ImVec4(0.27f, 0.37f, 0.54f, 1.00f);
+        colors[ImGuiCol_Separator] = ImVec4(0.18f, 0.22f, 0.30f, 0.60f);
+        colors[ImGuiCol_SeparatorHovered] = ImVec4(0.25f, 0.32f, 0.45f, 0.78f);
+        colors[ImGuiCol_SeparatorActive] = ImVec4(0.30f, 0.40f, 0.58f, 1.00f);
+        colors[ImGuiCol_ResizeGrip] = ImVec4(0.20f, 0.55f, 0.90f, 0.25f);
+        colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.25f, 0.65f, 0.98f, 0.67f);
+        colors[ImGuiCol_ResizeGripActive] = ImVec4(0.30f, 0.72f, 1.00f, 0.95f);
+        colors[ImGuiCol_Tab] = ImVec4(0.12f, 0.16f, 0.22f, 0.86f);
+        colors[ImGuiCol_TabHovered] = ImVec4(0.22f, 0.30f, 0.42f, 0.90f);
+        colors[ImGuiCol_TabActive] = ImVec4(0.17f, 0.23f, 0.34f, 1.00f);
+        colors[ImGuiCol_PlotHistogram] = ImVec4(0.20f, 0.65f, 0.95f, 1.00f);
+        colors[ImGuiCol_PlotHistogramHovered] = ImVec4(0.25f, 0.75f, 1.00f, 1.00f);
     }
 } // anonymous namespace
 
@@ -308,7 +401,7 @@ int main(int argc, char** argv) {
     }
 
     SDL_GL_MakeCurrent(window, gl_context);
-    SDL_GL_SetSwapInterval(1); // Enable VSync
+    SDL_GL_SetSwapInterval(1); // VSync
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -316,15 +409,7 @@ int main(int argc, char** argv) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     setup_unicode_fonts(io);
-    ImGui::StyleColorsDark();
-
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.FramePadding = ImVec2(8.0f, 6.0f);
-    style.ItemSpacing = ImVec2(10.0f, 8.0f);
-    style.ScrollbarSize = 18.0f;
-    style.FrameRounding = 5.0f;
-    style.GrabRounding = 5.0f;
-    style.WindowRounding = 6.0f;
+    setup_modern_theme();
 
     ImGui_ImplSDL3_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
@@ -363,7 +448,7 @@ int main(int argc, char** argv) {
         int display_w = 0, display_h = 0;
         SDL_GetWindowSizeInPixels(window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
-        glClearColor(0.12f, 0.13f, 0.15f, 1.00f);
+        glClearColor(0.08f, 0.09f, 0.12f, 1.00f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

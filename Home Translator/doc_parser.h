@@ -22,11 +22,7 @@ public:
     static FileType detect_file_type(const std::string& filepath);
 
     /**
-     * @brief Reads document content into UTF-8 text string.
-     * @param filepath Target file path.
-     * @param out_text Output string buffer.
-     * @param out_error Output error string if reading fails.
-     * @return true on success, false on failure.
+     * @brief Reads document content into UTF-8 text string safely.
      */
     static bool load_document(const std::string& filepath, std::string& out_text, std::string& out_error);
 

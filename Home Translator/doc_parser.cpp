@@ -1,16 +1,17 @@
 /* ========================================================================== */
 /* doc_parser.cpp                                                             */
-/* Implementation of document parser and format hooks                         */
+/* Optimized document parser with zero-copy magic-byte validation            */
 /* ========================================================================== */
 #include "doc_parser.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
 DocParser::FileType DocParser::detect_file_type(const std::string& filepath) {
-    size_t dot_pos = filepath.find_last_of(".");
+    size_t dot_pos = filepath.find_last_of('.');
     if (dot_pos == std::string::npos) {
         return FileType::TEXT;
     }
@@ -23,11 +24,12 @@ DocParser::FileType DocParser::detect_file_type(const std::string& filepath) {
     if (ext == "pdf") {
         return FileType::PDF;
     }
-    else if (ext == "docx") {
+    if (ext == "docx") {
         return FileType::DOCX;
     }
-    else if (ext == "txt" || ext == "md" || ext == "csv" || ext == "json" ||
-        ext == "xml" || ext == "html" || ext == "htm" || ext == "log") {
+    if (ext == "txt" || ext == "md" || ext == "csv" || ext == "json" ||
+        ext == "xml" || ext == "html" || ext == "htm" || ext == "log" ||
+        ext == "c" || ext == "cpp" || ext == "h" || ext == "hpp" || ext == "py") {
         return FileType::TEXT;
     }
 
@@ -41,13 +43,12 @@ bool DocParser::load_document(const std::string& filepath, std::string& out_text
     FileType ft = detect_file_type(filepath);
 
     switch (ft) {
-    case FileType::TEXT:
-    case FileType::UNKNOWN:
-        return read_text_file(filepath, out_text, out_error);
     case FileType::PDF:
         return read_pdf_file(filepath, out_text, out_error);
     case FileType::DOCX:
         return read_docx_file(filepath, out_text, out_error);
+    case FileType::TEXT:
+    case FileType::UNKNOWN:
     default:
         return read_text_file(filepath, out_text, out_error);
     }
@@ -72,6 +73,13 @@ bool DocParser::read_text_file(const std::string& filepath, std::string& out_tex
         return true;
     }
 
+    // Guard against reading multi-gigabyte files directly into memory
+    constexpr size_t MAX_TEXT_FILE_SIZE = 64 * 1024 * 1024; // 64 MB cap
+    if (static_cast<size_t>(size) > MAX_TEXT_FILE_SIZE) {
+        out_error = "File exceeds maximum supported plain text size (64 MB).";
+        return false;
+    }
+
     out_text.resize(static_cast<size_t>(size));
     file.seekg(0, std::ios::beg);
     file.read(&out_text[0], size);
@@ -93,22 +101,42 @@ bool DocParser::read_text_file(const std::string& filepath, std::string& out_tex
     return true;
 }
 
+// Memory-safe inspection: validates header before allocating memory
 bool DocParser::read_pdf_file(const std::string& filepath, std::string& out_text, std::string& out_error) {
-    if (read_text_file(filepath, out_text, out_error)) {
-        if (out_text.find("%PDF") == 0) {
-            out_error = "PDF binary detected. Compile with Poppler (-lpoppler-cpp) to extract PDF text.";
-            out_text.clear(); // Free memory on unsupported binary
-            return false;
-        }
-        return true;
-    }
     out_text.clear();
-    return false;
+    std::ifstream file(filepath, std::ios::in | std::ios::binary);
+    if (!file.is_open()) {
+        out_error = "Failed to open PDF file: " + filepath;
+        return false;
+    }
+
+    char header[5] = { 0 };
+    file.read(header, 4);
+    if (std::strncmp(header, "%PDF", 4) == 0) {
+        out_error = "PDF binary detected. Please convert PDF to UTF-8 text or compile with Poppler (-lpoppler-cpp).";
+        return false;
+    }
+
+    file.close();
+    return read_text_file(filepath, out_text, out_error);
 }
 
+// Memory-safe inspection: validates ZIP magic bytes without full file read
 bool DocParser::read_docx_file(const std::string& filepath, std::string& out_text, std::string& out_error) {
-    (void)filepath;
     out_text.clear();
-    out_error = "DOCX binary detected. Compile with minizip & libxml2 to extract word/document.xml.";
-    return false;
+    std::ifstream file(filepath, std::ios::in | std::ios::binary);
+    if (!file.is_open()) {
+        out_error = "Failed to open DOCX file: " + filepath;
+        return false;
+    }
+
+    char header[5] = { 0 };
+    file.read(header, 4);
+    if (header[0] == 'P' && header[1] == 'K' && header[2] == 0x03 && header[3] == 0x04) {
+        out_error = "DOCX binary (ZIP archive) detected. Please save as .txt or compile with minizip & libxml2.";
+        return false;
+    }
+
+    file.close();
+    return read_text_file(filepath, out_text, out_error);
 }

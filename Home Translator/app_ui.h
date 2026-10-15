@@ -1,6 +1,6 @@
 /* ========================================================================== */
 /* app_ui.h                                                                   */
-/* Header for UI with Generation Progress Bar & Cancel Button                */
+/* Header for UI with Layout Mode, Throttled Metrics & Rounded Controls       */
 /* ========================================================================== */
 #ifndef APP_UI_H
 #define APP_UI_H
@@ -35,7 +35,10 @@ private:
     void render_text_editors_panel();
     void render_status_bar();
 
-    // Zero-allocation O(N) word counter
+    // Layout directive helper
+    void apply_layout_directive();
+
+    // Fast word counter
     static size_t count_words(const std::string& str);
 
     AIEngine* m_engine = nullptr;
@@ -46,9 +49,13 @@ private:
 
     char m_doc_path_buf[512] = "";
     std::string m_input_text;
-    std::string m_custom_directive; // User prompt directive for AI
+    std::string m_custom_directive;
 
-    // Cached output and zero-allocation performance metrics
+    // Toggles
+    bool m_auto_correct_on_translate = true;
+    bool m_layout_formatting = false; // Layout Text ON vs Bypass OFF
+
+    // Metrics & Throttling
     std::string m_output_text;
     uint64_t m_output_revision{ 0 };
     size_t m_cached_input_words{ 0 };
@@ -56,6 +63,8 @@ private:
     size_t m_cached_output_words{ 0 };
     size_t m_cached_output_chars{ 0 };
     size_t m_last_input_size{ 0 };
+    double m_last_word_count_time{ 0.0 };
+    bool m_was_generating{ false };
 
     std::vector<const char*> m_active_lang_ptrs;
     int m_in_lang_idx = 0;
@@ -64,7 +73,6 @@ private:
     int m_ctx_size = 4096;
 
     bool m_show_download_modal = false;
-
     bool m_auto_scroll = true;
     std::string m_status_msg;
     bool m_status_is_error = false;

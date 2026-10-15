@@ -1,6 +1,6 @@
 /* ========================================================================== */
 /* ai_engine.h                                                                */
-/* Dynamic Language Prompts, Chunking Pipeline & Sanitization Caching         */
+/* Dynamic Prompts, Adaptive Chunking, Layout Mode & Fast Sanitization        */
 /* ========================================================================== */
 #ifndef AI_ENGINE_H
 #define AI_ENGINE_H
@@ -25,20 +25,23 @@ public:
     bool init();
     bool load_model_async(const std::string& model_path, uint32_t requested_ctx = 4096);
 
-    // Translation task with user prompt directive and auto-chunking
+    // Translation task with auto_correct_typos and layout_formatting toggles
     bool start_translation_task(
         const std::string& input_lang,
         const std::string& output_lang,
         const std::string& input_text,
         const std::string& custom_directive = "",
+        bool auto_correct_typos = true,
+        bool layout_formatting = false,
         int32_t max_tokens = 2048
     );
 
-    // Typo / Grammar auto-corrector task with user prompt directive
+    // Typo / Grammar / Layout formatting task
     bool start_auto_correct_task(
         const std::string& input_lang,
         const std::string& input_text,
         const std::string& custom_directive = "",
+        bool layout_formatting = false,
         int32_t max_tokens = 2048
     );
 
@@ -63,7 +66,7 @@ public:
 private:
     static bool stream_callback(const char* piece, void* user_data);
     static std::string sanitize_thinking_output(const std::string& input);
-    static std::vector<std::string> split_into_chunks(const std::string& text, size_t max_chunk_chars = 1500);
+    static std::vector<std::string> split_into_chunks(const std::string& text, size_t max_chunk_chars = 3800);
 
     void set_error(const std::string& err);
     void clear_error();
@@ -72,7 +75,9 @@ private:
         const std::string& input_lang,
         const std::string& output_lang,
         bool is_auto_correct,
-        const std::string& custom_directive
+        const std::string& custom_directive,
+        bool auto_correct_typos,
+        bool layout_formatting
     ) const;
 
     void task_thread_proc(
@@ -81,6 +86,8 @@ private:
         std::string input_text,
         std::string custom_directive,
         bool is_auto_correct,
+        bool auto_correct_typos,
+        bool layout_formatting,
         int32_t max_tokens
     );
 
@@ -97,7 +104,7 @@ private:
     size_t m_current_chunk{ 0 };
     size_t m_total_chunks{ 0 };
 
-    // Output Buffer, Version Revision & Cache
+    // Output Buffer, Version Revision & Optimized Cache
     mutable std::mutex m_output_mutex;
     std::string m_output_buffer;
     std::string m_sanitized_cache;
