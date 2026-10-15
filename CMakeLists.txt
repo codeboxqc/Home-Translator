@@ -38,13 +38,15 @@ if(WIN32)
     file(DOWNLOAD "${LIBINFER_URL_BASE}/infer.dll" "${CMAKE_CURRENT_BINARY_DIR}/infer.dll" SHOW_PROGRESS)
 endif()
 
-# Include directories
+# Include directories (Updated to include ImGui and libinfer)
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CURL_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIR}
     ${SDL3_INCLUDE_DIRS}
     ${LIBINFER_DIR}
+    "${CMAKE_CURRENT_SOURCE_DIR}/imgui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends"
 )
 
 # ImGui Source Files (Place imgui files in imgui/ or current directory)
@@ -66,9 +68,9 @@ if(NOT IMGUI_SOURCES)
     )
 endif()
 
-# Project Sources
+# Project Sources (Fixed filename spacing)
 set(APP_SOURCES
-    "Home Translator.cpp"
+    "HomeTranslator.cpp" 
     "ai_engine.cpp"
     "app_ui.cpp"
     "doc_parser.cpp"
