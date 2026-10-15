@@ -26,6 +26,8 @@ jobs:
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     # Linux requires specific windowing and graphics headers to compile SDL3
     - name: Install Linux Prerequisites
