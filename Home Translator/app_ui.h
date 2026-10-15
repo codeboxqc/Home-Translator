@@ -9,6 +9,7 @@
 #include "doc_parser.h"
 #include "model_downloader.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -23,7 +24,8 @@ public:
 private:
     void scan_available_models();
     int count_installed_official_presets() const;
-    std::vector<std::string> get_active_model_supported_languages() const;
+    const std::vector<std::string>& get_active_model_supported_languages() const;
+    void update_active_languages();
 
     void render_donation_button();
     void render_download_modal();
@@ -33,6 +35,7 @@ private:
     void render_text_editors_panel();
     void render_status_bar();
 
+    // Zero-allocation O(N) word counter
     static size_t count_words(const std::string& str);
 
     AIEngine* m_engine = nullptr;
@@ -43,7 +46,18 @@ private:
 
     char m_doc_path_buf[512] = "";
     std::string m_input_text;
+    std::string m_custom_directive; // User prompt directive for AI
 
+    // Cached output and zero-allocation performance metrics
+    std::string m_output_text;
+    uint64_t m_output_revision{ 0 };
+    size_t m_cached_input_words{ 0 };
+    size_t m_cached_input_chars{ 0 };
+    size_t m_cached_output_words{ 0 };
+    size_t m_cached_output_chars{ 0 };
+    size_t m_last_input_size{ 0 };
+
+    std::vector<const char*> m_active_lang_ptrs;
     int m_in_lang_idx = 0;
     int m_out_lang_idx = 1;
     int m_input_source_idx = 0; // 0: Window Text, 1: Clipboard, 2: File

@@ -1,6 +1,6 @@
 /* ========================================================================== */
 /* model_downloader.cpp                                                       */
-/* Updated with Qwen 3 8B (119 languages) download preset                     */
+/* High-Throughput Buffered libcurl Downloader                                */
 /* ========================================================================== */
 #include "model_downloader.h"
 
@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -20,6 +21,9 @@ namespace {
         std::ofstream* out = static_cast<std::ofstream*>(stream);
         size_t total_size = size * nmemb;
         out->write(static_cast<const char*>(ptr), total_size);
+        if (!out->good()) {
+            return 0; // Signal write failure to abort curl safely
+        }
         return total_size;
     }
 
@@ -73,8 +77,8 @@ ModelDownloader::~ModelDownloader() {
     curl_global_cleanup();
 }
 
-std::vector<ModelPreset> ModelDownloader::get_presets() {
-    return {
+const std::vector<ModelPreset>& ModelDownloader::get_presets() {
+    static const std::vector<ModelPreset> s_presets = {
         {
             "Qwen 2.5 7B Instruct (Q4_K_M)",
             "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
@@ -94,6 +98,7 @@ std::vector<ModelPreset> ModelDownloader::get_presets() {
             "3.42 GB - Fast model supporting French, English, German, Italian, Portuguese, Hindi, Spanish, Thai."
         }
     };
+    return s_presets;
 }
 
 bool ModelDownloader::start_download(const ModelPreset& preset) {
@@ -158,10 +163,16 @@ void ModelDownloader::download_thread_proc(ModelPreset preset) {
         return;
     }
 
+    // 1 MB disk buffer to dramatically accelerate multi-gigabyte GGUF file downloads
+    std::vector<char> disk_io_buffer(1024 * 1024);
+    out_file.rdbuf()->pubsetbuf(disk_io_buffer.data(), disk_io_buffer.size());
+
     CURL* curl = curl_easy_init();
     if (!curl) {
         std::lock_guard<std::mutex> lock(m_status_mutex);
-        m_status_message = "Error: Failed to initialize libcurl easy handle.";
+        m_status_message = "Error: Failed to initialize libcurl handle.";
+        out_file.close();
+        fs::remove(out_path);
         m_is_downloading.store(false);
         return;
     }

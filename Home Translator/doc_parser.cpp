@@ -16,16 +16,18 @@ DocParser::FileType DocParser::detect_file_type(const std::string& filepath) {
     }
 
     std::string ext = filepath.substr(dot_pos + 1);
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { 
-        return static_cast<char>(std::tolower(c)); 
-    });
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+        });
 
     if (ext == "pdf") {
         return FileType::PDF;
-    } else if (ext == "docx") {
+    }
+    else if (ext == "docx") {
         return FileType::DOCX;
-    } else if (ext == "txt" || ext == "md" || ext == "csv" || ext == "json" ||
-               ext == "xml" || ext == "html" || ext == "htm" || ext == "log") {
+    }
+    else if (ext == "txt" || ext == "md" || ext == "csv" || ext == "json" ||
+        ext == "xml" || ext == "html" || ext == "htm" || ext == "log") {
         return FileType::TEXT;
     }
 
@@ -39,15 +41,15 @@ bool DocParser::load_document(const std::string& filepath, std::string& out_text
     FileType ft = detect_file_type(filepath);
 
     switch (ft) {
-        case FileType::TEXT:
-        case FileType::UNKNOWN:
-            return read_text_file(filepath, out_text, out_error);
-        case FileType::PDF:
-            return read_pdf_file(filepath, out_text, out_error);
-        case FileType::DOCX:
-            return read_docx_file(filepath, out_text, out_error);
-        default:
-            return read_text_file(filepath, out_text, out_error);
+    case FileType::TEXT:
+    case FileType::UNKNOWN:
+        return read_text_file(filepath, out_text, out_error);
+    case FileType::PDF:
+        return read_pdf_file(filepath, out_text, out_error);
+    case FileType::DOCX:
+        return read_docx_file(filepath, out_text, out_error);
+    default:
+        return read_text_file(filepath, out_text, out_error);
     }
 }
 
@@ -65,12 +67,18 @@ bool DocParser::read_text_file(const std::string& filepath, std::string& out_tex
         return false;
     }
 
+    if (size == 0) {
+        out_text.clear();
+        return true;
+    }
+
     out_text.resize(static_cast<size_t>(size));
     file.seekg(0, std::ios::beg);
     file.read(&out_text[0], size);
 
     if (!file && !file.eof()) {
         out_error = "Error occurred while reading file buffer: " + filepath;
+        out_text.clear();
         return false;
     }
 
@@ -86,49 +94,21 @@ bool DocParser::read_text_file(const std::string& filepath, std::string& out_tex
 }
 
 bool DocParser::read_pdf_file(const std::string& filepath, std::string& out_text, std::string& out_error) {
-    /* ========================================================================= */
-    /* Poppler PDF Parser Integration Extension Hook                             */
-    /* ========================================================================= */
-    /* To enable full PDF text extraction using Poppler-CPP:                     */
-    /* #include <poppler/cpp/poppler-document.h>                                  */
-    /* #include <poppler/cpp/poppler-page.h>                                      */
-    /*                                                                           */
-    /* poppler::document* doc = poppler::document::load_from_file(filepath);     */
-    /* if (!doc) { out_error = "Poppler failed to parse PDF"; return false; }   */
-    /* int num_pages = doc->pages();                                             */
-    /* std::ostringstream oss;                                                   */
-    /* for (int i = 0; i < num_pages; ++i) {                                     */
-    /*     poppler::page* p = doc->create_page(i);                               */
-    /*     if (p) { oss << p->text().to_utf8().data() << "\n"; delete p; }        */
-    /* }                                                                         */
-    /* delete doc;                                                               */
-    /* out_text = oss.str();                                                     */
-    /* return true;                                                              */
-    /* ========================================================================= */
-
-    // Graceful fallback reading text stream directly or reporting backend requirement
     if (read_text_file(filepath, out_text, out_error)) {
         if (out_text.find("%PDF") == 0) {
             out_error = "PDF binary detected. Compile with Poppler (-lpoppler-cpp) to extract PDF text.";
+            out_text.clear(); // Free memory on unsupported binary
             return false;
         }
         return true;
     }
+    out_text.clear();
     return false;
 }
 
 bool DocParser::read_docx_file(const std::string& filepath, std::string& out_text, std::string& out_error) {
-    /* ========================================================================= */
-    /* Minizip / libxml2 DOCX Parser Integration Extension Hook                  */
-    /* ========================================================================= */
-    /* DOCX files are PKZIP archives containing "word/document.xml".            */
-    /* To enable full DOCX text extraction:                                      */
-    /* 1. Open zip archive using minizip / libzip (e.g. unzOpen).                */
-    /* 2. Extract buffer for "word/document.xml".                                */
-    /* 3. Parse XML DOM tree and aggregate content inside <w:t> tags.            */
-    /* 4. Store extracted string in out_text.                                    */
-    /* ========================================================================= */
-
+    (void)filepath;
+    out_text.clear();
     out_error = "DOCX binary detected. Compile with minizip & libxml2 to extract word/document.xml.";
     return false;
 }

@@ -1,25 +1,36 @@
 /* ========================================================================== */
 /* app_ui.cpp                                                                 */
-/* Full UI implementation with Animated Progress Bar & Cancel Button         */
+/* Full UI implementation with Auto-Corrector & Chunk Progress Bar            */
 /* ========================================================================== */
 #include "app_ui.h"
 
 #include <imgui.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
-#include <sstream>
 
 namespace fs = std::filesystem;
 
 namespace {
-    // UTF-8 aware ImGui Multiline InputText callback
-    static int InputTextStdStringCallback(ImGuiInputTextCallbackData* data) {
+    struct InputTextCallback_UserData {
+        std::string* Str;
+        ImGuiInputTextCallback  ChainCallback;
+        void* ChainCallbackUserData;
+    };
+
+    static int InputTextCallback(ImGuiInputTextCallbackData* data) {
+        InputTextCallback_UserData* user_data = static_cast<InputTextCallback_UserData*>(data->UserData);
         if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
-            std::string* str = static_cast<std::string*>(data->UserData);
+            std::string* str = user_data->Str;
             str->resize(data->BufTextLen);
-            data->Buf = &((*str)[0]);
+            data->Buf = const_cast<char*>(str->c_str());
+        }
+        else if (user_data->ChainCallback) {
+            data->UserData = user_data->ChainCallbackUserData;
+            return user_data->ChainCallback(data);
         }
         return 0;
     }
@@ -31,14 +42,40 @@ namespace {
         ImGuiInputTextFlags flags = 0
     ) {
         flags |= ImGuiInputTextFlags_CallbackResize;
+        InputTextCallback_UserData cb_user_data;
+        cb_user_data.Str = str;
+        cb_user_data.ChainCallback = nullptr;
+        cb_user_data.ChainCallbackUserData = nullptr;
         return ImGui::InputTextMultiline(
             label,
             const_cast<char*>(str->c_str()),
             str->capacity() + 1,
             size,
             flags,
-            InputTextStdStringCallback,
-            static_cast<void*>(str)
+            InputTextCallback,
+            &cb_user_data
+        );
+    }
+
+    bool InputTextWithHintStdString(
+        const char* label,
+        const char* hint,
+        std::string* str,
+        ImGuiInputTextFlags flags = 0
+    ) {
+        flags |= ImGuiInputTextFlags_CallbackResize;
+        InputTextCallback_UserData cb_user_data;
+        cb_user_data.Str = str;
+        cb_user_data.ChainCallback = nullptr;
+        cb_user_data.ChainCallbackUserData = nullptr;
+        return ImGui::InputTextWithHint(
+            label,
+            hint,
+            const_cast<char*>(str->c_str()),
+            str->capacity() + 1,
+            flags,
+            InputTextCallback,
+            &cb_user_data
         );
     }
 
@@ -62,7 +99,9 @@ namespace {
 
 AppUI::AppUI(AIEngine* engine) : m_engine(engine) {
     m_input_text.reserve(16384);
+    m_output_text.reserve(16384);
     scan_available_models();
+    update_active_languages();
 
     int installed_presets = count_installed_official_presets();
 
@@ -87,7 +126,7 @@ AppUI::~AppUI() {}
 void AppUI::scan_available_models() {
     m_available_models.clear();
 
-    std::vector<std::string> search_paths = { "models", "." };
+    const std::vector<std::string> search_paths = { "models", "." };
     for (const auto& sp : search_paths) {
         if (fs::exists(sp) && fs::is_directory(sp)) {
             for (const auto& entry : fs::directory_iterator(sp)) {
@@ -100,7 +139,7 @@ void AppUI::scan_available_models() {
 }
 
 int AppUI::count_installed_official_presets() const {
-    auto presets = ModelDownloader::get_presets();
+    const auto& presets = ModelDownloader::get_presets();
     int count = 0;
     for (const auto& p : presets) {
         if (is_file_present(p.filename)) count++;
@@ -108,60 +147,80 @@ int AppUI::count_installed_official_presets() const {
     return count;
 }
 
-std::vector<std::string> AppUI::get_active_model_supported_languages() const {
-    if (m_available_models.empty() || m_selected_model_idx >= static_cast<int>(m_available_models.size())) {
-        return { "French (Français)", "English" };
-    }
+const std::vector<std::string>& AppUI::get_active_model_supported_languages() const {
+    static const std::vector<std::string> default_langs = { "French (FranÃ§ais)", "English" };
 
-    std::string active_path = m_available_models[m_selected_model_idx];
-
-    // Llama-3.2-3B-Instruct (8 Languages)
-    if (active_path.find("Llama-3.2") != std::string::npos) {
-        return {
-            "French (Français)", "English", "German (Allemand)", "Spanish (Espagnol)",
-            "Italian (Italien)", "Portuguese (Portugais)", "Hindi", "Thai (Thaï)"
-        };
-    }
-
-    // Qwen2.5-7B-Instruct (29 Languages)
-    if (active_path.find("Qwen2.5") != std::string::npos) {
-        return {
-            "English", "French (Français)", "Spanish (Espagnol)", "German (Allemand)",
-            "Italian (Italien)", "Portuguese (Portugais)", "Dutch (Néerlandais)", "Russian (Russe)",
-            "Polish (Polonais)", "Czech (Tchèque)", "Arabic (Arabe)", "Turkish (Turc)",
-            "Persian (Farsi/Persan)", "Hebrew (Hébreu)", "Chinese (Chinois)", "Japanese (Japonais)",
-            "Korean (Coréen)", "Hindi", "Bengali", "Urdu (Ourdou)", "Vietnamese (Vietnamien)",
-            "Thai (Thaï)", "Indonesian (Indonésien)", "Malay (Malais)", "Tagalog (Filipino)",
-            "Khmer (Cambodgien)", "Lao (Laotien)", "Burmese (Birman)", "Cebuano (Visayan)"
-        };
-    }
-
-    // Qwen3-8B (Comprehensive Multilingual List)
-    return {
-        "English", "French (Français)", "Spanish (Espagnol)", "German (Allemand)",
-        "Italian (Italien)", "Portuguese (Portugais)", "Dutch (Néerlandais)", "Russian (Russe)",
-        "Polish (Polonais)", "Czech (Tchèque)", "Arabic (Arabe)", "Turkish (Turc)",
-        "Persian (Farsi/Persan)", "Hebrew (Hébreu)", "Chinese (Chinois)", "Japanese (Japonais)",
-        "Korean (Coréen)", "Hindi", "Bengali", "Urdu (Ourdou)", "Vietnamese (Vietnamien)",
-        "Thai (Thaï)", "Indonesian (Indonésien)", "Malay (Malais)", "Tagalog (Filipino)",
-        "Khmer (Cambodgien)", "Lao (Laotien)", "Burmese (Birman)", "Cebuano (Visayan)",
-        "Swedish (Suédois)", "Danish (Danois)", "Norwegian (Norvégien)", "Finnish (Finnois)",
-        "Greek (Grec)", "Slovak (Slovaque)", "Hungarian (Hongrois)", "Romanian (Roumain)",
-        "Bulgarian (Bulgare)", "Ukrainian (Ukrainien)", "Serbian (Serbe)", "Croatian (Croate)",
-        "Lithuanian (Lituanien)", "Latvian (Letton)", "Estonian (Estonien)",
-        "Tamil (Tamoul)", "Telugu (Télougou)", "Marathi", "Gujarati", "Punjabi (Pendjabi)",
-        "Malayalam", "Kannada", "Sinhalese (Cinghalais)", "Nepali (Népalais)", "Pashto (Pachto)",
-        "Kazakh", "Uzbek (Ouzbek)", "Azerbaijani (Azéri)", "Georgian (Géorgien)", "Armenian (Arménien)",
-        "Javanese (Javanais)", "Swahili", "Amharic (Amharique)", "Yoruba", "Igbo",
-        "Zulu (Zoulou)", "Hausa (Haoussa)", "Afrikaans", "Malagasy (Malgache)"
+    static const std::vector<std::string> llama_langs = {
+        "French (FranÃ§ais)", "English", "German (Allemand)", "Spanish (Espagnol)",
+        "Italian (Italien)", "Portuguese (Portugais)", "Hindi", "Thai (ThaÃ¯)"
     };
+
+    static const std::vector<std::string> qwen25_langs = {
+        "English", "French (FranÃ§ais)", "Spanish (Espagnol)", "German (Allemand)",
+        "Italian (Italien)", "Portuguese (Portugais)", "Dutch (NÃ©erlandais)", "Russian (Russe)",
+        "Polish (Polonais)", "Czech (TchÃ¨que)", "Arabic (Arabe)", "Turkish (Turc)",
+        "Persian (Farsi)", "Hebrew (HÃ©breu)", "Chinese (Chinois)", "Japanese (Japonais)",
+        "Korean (CorÃ©en)", "Hindi", "Bengali", "Urdu", "Vietnamese (Vietnamien)",
+        "Thai (ThaÃ¯)", "Indonesian (IndonÃ©sien)", "Malay (Malais)", "Tagalog (Filipino)",
+        "Khmer", "Lao", "Burmese", "Cebuano"
+    };
+
+    static const std::vector<std::string> qwen3_langs = {
+        "English", "French (FranÃ§ais)", "Spanish (Espagnol)", "German (Allemand)",
+        "Italian (Italien)", "Portuguese (Portugais)", "Dutch (NÃ©erlandais)", "Russian (Russe)",
+        "Polish (Polonais)", "Czech (TchÃ¨que)", "Arabic (Arabe)", "Turkish (Turc)",
+        "Persian (Farsi)", "Hebrew (HÃ©breu)", "Chinese (Chinois)", "Japanese (Japonais)",
+        "Korean (CorÃ©en)", "Hindi", "Bengali", "Urdu", "Vietnamese (Vietnamien)",
+        "Thai (ThaÃ¯)", "Indonesian (IndonÃ©sien)", "Malay (Malais)", "Tagalog (Filipino)",
+        "Khmer", "Lao", "Burmese", "Cebuano", "Swedish (SuÃ©dois)", "Danish (Danois)",
+        "Norwegian (NorvÃ©gien)", "Finnish (Finnois)", "Greek (Grec)", "Slovak (Slovaque)",
+        "Hungarian (Hongrois)", "Romanian (Roumain)", "Bulgarian (Bulgare)", "Ukrainian (Ukrainien)",
+        "Serbian (Serbe)", "Croatian (Croate)", "Lithuanian (Lituanien)", "Latvian (Letton)",
+        "Estonian (Estonien)", "Tamil", "Telugu", "Marathi", "Gujarati", "Punjabi",
+        "Malayalam", "Kannada", "Sinhala", "Nepali", "Pashto", "Kazakh", "Uzbek",
+        "Azerbaijani (AzÃ©ri)", "Georgian (GÃ©orgien)", "Armenian (ArmÃ©nien)", "Swahili", "Afrikaans"
+    };
+
+    if (m_available_models.empty() || m_selected_model_idx >= static_cast<int>(m_available_models.size())) {
+        return default_langs;
+    }
+
+    const std::string& active_path = m_available_models[m_selected_model_idx];
+    if (active_path.find("Llama-3.2") != std::string::npos) {
+        return llama_langs;
+    }
+    if (active_path.find("Qwen2.5") != std::string::npos) {
+        return qwen25_langs;
+    }
+    return qwen3_langs;
+}
+
+void AppUI::update_active_languages() {
+    m_active_lang_ptrs.clear();
+    const auto& langs = get_active_model_supported_languages();
+    m_active_lang_ptrs.reserve(langs.size());
+    for (const auto& l : langs) {
+        m_active_lang_ptrs.push_back(l.c_str());
+    }
+
+    if (m_in_lang_idx >= static_cast<int>(m_active_lang_ptrs.size())) m_in_lang_idx = 0;
+    if (m_out_lang_idx >= static_cast<int>(m_active_lang_ptrs.size())) {
+        m_out_lang_idx = (m_active_lang_ptrs.size() > 1) ? 1 : 0;
+    }
 }
 
 size_t AppUI::count_words(const std::string& str) {
-    std::istringstream iss(str);
-    std::string word;
     size_t count = 0;
-    while (iss >> word) count++;
+    bool in_word = false;
+    for (unsigned char c : str) {
+        if (std::isspace(c)) {
+            in_word = false;
+        }
+        else if (!in_word) {
+            count++;
+            in_word = true;
+        }
+    }
     return count;
 }
 
@@ -185,6 +244,17 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
 }
 
 void AppUI::render() {
+    if (m_engine->get_output_text_if_dirty(m_output_text, m_output_revision)) {
+        m_cached_output_words = count_words(m_output_text);
+        m_cached_output_chars = m_output_text.size();
+    }
+
+    if (m_input_text.size() != m_last_input_size) {
+        m_cached_input_words = count_words(m_input_text);
+        m_cached_input_chars = m_input_text.size();
+        m_last_input_size = m_input_text.size();
+    }
+
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -201,7 +271,6 @@ void AppUI::render() {
 
     render_controls_panel();
 
-    // Render Progress Bar & Cancel Button when generation is active
     if (m_engine->is_generating()) {
         render_progress_and_cancel_bar();
     }
@@ -231,8 +300,8 @@ void AppUI::render_donation_button() {
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, col_button_active);
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 170.0f);
-    if (ImGui::Button(" Buy me a coffee ", ImVec2(150, 26))) {
+    ImGui::SameLine(ImGui::GetWindowWidth() - 190.0f);
+    if (ImGui::Button(" Buy me a coffee ", ImVec2(170, 30))) {
         open_url("https://buymeacoffee.com/www.nutz.club");
     }
 
@@ -245,28 +314,33 @@ void AppUI::render_progress_and_cancel_bar() {
     double t = ImGui::GetTime();
     float pulse = (static_cast<float>(std::sin(t * 4.0)) + 1.0f) * 0.5f;
 
-    std::string out_text = m_engine->get_output_text();
-    size_t words = count_words(out_text);
-    size_t chars = out_text.size();
+    size_t cur_chunk = 0, tot_chunks = 0;
+    float chunk_pct = 0.0f;
+    m_engine->get_chunk_progress(cur_chunk, tot_chunks, chunk_pct);
 
     char progress_str[128];
-    snprintf(progress_str, sizeof(progress_str), "Generating Translation... (%zu words / %zu chars generated)", words, chars);
+    if (tot_chunks > 1) {
+        snprintf(progress_str, sizeof(progress_str), "Chunk %zu/%zu (%.1f%%) - %zu words generated",
+            cur_chunk, tot_chunks, chunk_pct * 100.0f, m_cached_output_words);
+    }
+    else {
+        snprintf(progress_str, sizeof(progress_str), "Generating... (%zu words / %zu chars generated)",
+            m_cached_output_words, m_cached_output_chars);
+    }
 
     float avail_w = ImGui::GetContentRegionAvail().x - 170.0f;
 
-    // Animated Pulsing Progress Bar
     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.6f + 0.3f * pulse, 0.9f, 1.0f));
-    ImGui::ProgressBar(-1.0f, ImVec2(avail_w, 28.0f), progress_str);
+    ImGui::ProgressBar(tot_chunks > 1 ? chunk_pct : -1.0f, ImVec2(avail_w, 32.0f), progress_str);
     ImGui::PopStyleColor();
 
     ImGui::SameLine(0, 10.0f);
 
-    // Red Cancel / Abort Button
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.18f, 0.18f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.98f, 0.28f, 0.28f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.70f, 0.12f, 0.12f, 1.0f));
 
-    if (ImGui::Button(" CANCEL / STOP ", ImVec2(150, 28))) {
+    if (ImGui::Button(" CANCEL / STOP ", ImVec2(150, 32))) {
         m_engine->abort();
         m_status_msg = "Generation cancelled by user.";
         m_status_is_error = true;
@@ -278,10 +352,10 @@ void AppUI::render_progress_and_cancel_bar() {
 
 void AppUI::render_download_modal() {
     ImGui::OpenPopup("AI Models Download Menu");
-    ImGui::SetNextWindowSize(ImVec2(720, 480), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(760, 520), ImGuiCond_Appearing);
 
     if (ImGui::BeginPopupModal("AI Models Download Menu", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        auto presets = ModelDownloader::get_presets();
+        const auto& presets = ModelDownloader::get_presets();
         int installed_count = count_installed_official_presets();
 
         ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "AI Model Management & Download Menu");
@@ -299,18 +373,18 @@ void AppUI::render_download_modal() {
             ImGui::Text("%s", presets[i].name.c_str());
             ImGui::TextDisabled("%s", presets[i].description.c_str());
 
-            ImGui::SameLine(ImGui::GetWindowWidth() - 170.0f);
+            ImGui::SameLine(ImGui::GetWindowWidth() - 180.0f);
 
             if (installed) {
                 ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "[ Installed ]");
             }
             else if (downloading) {
                 ImGui::BeginDisabled();
-                ImGui::Button("Downloading...", ImVec2(140, 28));
+                ImGui::Button("Downloading...", ImVec2(150, 32));
                 ImGui::EndDisabled();
             }
             else {
-                if (ImGui::Button("Download Now", ImVec2(140, 28))) {
+                if (ImGui::Button("Download Now", ImVec2(150, 32))) {
                     m_downloader.start_download(presets[i]);
                 }
             }
@@ -323,12 +397,18 @@ void AppUI::render_download_modal() {
         if (downloading) {
             ImGui::Text("Status: %s", m_downloader.get_status_message().c_str());
             ImGui::ProgressBar(m_downloader.get_progress(), ImVec2(-1.0f, 0.0f));
-            if (ImGui::Button("Cancel Active Download")) {
+            if (m_downloader.is_cancel_requested()) {
+                ImGui::BeginDisabled();
+                ImGui::Button("Cancelling...");
+                ImGui::EndDisabled();
+            }
+            else if (ImGui::Button("Cancel Active Download")) {
                 m_downloader.cancel_download();
             }
         }
         else if (m_downloader.is_completed()) {
             scan_available_models();
+            update_active_languages();
             std::string downloaded_path = m_downloader.get_downloaded_filepath();
             m_downloader.reset_completed_flag();
 
@@ -344,17 +424,17 @@ void AppUI::render_download_modal() {
 
         if (installed_count == 3) {
             ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "All 3 official models are installed!");
-            ImGui::SameLine(ImGui::GetWindowWidth() - 200.0f);
-            if (ImGui::Button("Start Application", ImVec2(180, 35))) {
+            ImGui::SameLine(ImGui::GetWindowWidth() - 210.0f);
+            if (ImGui::Button("Start Application", ImVec2(190, 36))) {
                 m_show_download_modal = false;
                 ImGui::CloseCurrentPopup();
             }
         }
         else {
             ImGui::Text("Installed: %d / 3 models", installed_count);
-            ImGui::SameLine(ImGui::GetWindowWidth() - 220.0f);
+            ImGui::SameLine(ImGui::GetWindowWidth() - 230.0f);
             if (installed_count > 0 || !m_available_models.empty()) {
-                if (ImGui::Button("Continue with Installed", ImVec2(200, 35))) {
+                if (ImGui::Button("Continue with Installed", ImVec2(210, 36))) {
                     m_show_download_modal = false;
                     ImGui::CloseCurrentPopup();
                 }
@@ -375,29 +455,40 @@ void AppUI::render_header_panel() {
 
     render_donation_button();
 
-    ImGui::PushItemWidth(340.0f);
+    bool busy = m_engine->is_loading_model() || m_engine->is_generating();
+    if (busy) ImGui::BeginDisabled();
+
+    ImGui::PushItemWidth(360.0f);
     if (m_available_models.empty()) {
         ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.2f, 1.0f), "No .gguf models found!");
     }
     else {
         std::vector<const char*> model_ptrs;
+        model_ptrs.reserve(m_available_models.size());
         for (const auto& m : m_available_models) model_ptrs.push_back(m.c_str());
 
         int prev_idx = m_selected_model_idx;
         if (ImGui::Combo("Active Model", &m_selected_model_idx, model_ptrs.data(), static_cast<int>(model_ptrs.size()))) {
             if (m_selected_model_idx != prev_idx && !m_available_models.empty()) {
-                m_engine->load_model_async(m_available_models[m_selected_model_idx], static_cast<uint32_t>(m_ctx_size));
-                m_in_lang_idx = 0;
-                m_out_lang_idx = 1;
+                if (m_engine->load_model_async(m_available_models[m_selected_model_idx], static_cast<uint32_t>(m_ctx_size))) {
+                    m_in_lang_idx = 0;
+                    m_out_lang_idx = 1;
+                    update_active_languages();
+                }
+                else {
+                    m_selected_model_idx = prev_idx;
+                }
             }
         }
     }
     ImGui::PopItemWidth();
 
     ImGui::SameLine();
-    ImGui::PushItemWidth(80.0f);
+    ImGui::PushItemWidth(90.0f);
     ImGui::InputInt("Context", &m_ctx_size, 0);
     ImGui::PopItemWidth();
+
+    if (busy) ImGui::EndDisabled();
 
     ImGui::SameLine();
     if (ImGui::Button("Download Menu")) {
@@ -419,33 +510,25 @@ void AppUI::render_header_panel() {
 void AppUI::render_controls_panel() {
     const char* sources[] = { "Window Text", "Clipboard", "Loaded File" };
 
-    std::vector<std::string> active_langs = get_active_model_supported_languages();
-    std::vector<const char*> lang_ptrs;
-    for (const auto& l : active_langs) lang_ptrs.push_back(l.c_str());
-
-    if (m_in_lang_idx >= static_cast<int>(lang_ptrs.size())) m_in_lang_idx = 0;
-    if (m_out_lang_idx >= static_cast<int>(lang_ptrs.size())) m_out_lang_idx = (lang_ptrs.size() > 1) ? 1 : 0;
-
-    ImGui::PushItemWidth(130.0f);
+    ImGui::PushItemWidth(140.0f);
     ImGui::Combo("Input Source", &m_input_source_idx, sources, IM_ARRAYSIZE(sources));
     ImGui::PopItemWidth();
 
     ImGui::SameLine(0, 15.0f);
 
-    ImGui::PushItemWidth(170.0f);
-    ImGui::Combo("In Lang", &m_in_lang_idx, lang_ptrs.data(), static_cast<int>(lang_ptrs.size()));
+    ImGui::PushItemWidth(180.0f);
+    ImGui::Combo("In Lang", &m_in_lang_idx, m_active_lang_ptrs.data(), static_cast<int>(m_active_lang_ptrs.size()));
     ImGui::PopItemWidth();
 
     ImGui::SameLine(0, 15.0f);
 
-    ImGui::PushItemWidth(170.0f);
-    ImGui::Combo("Out Lang", &m_out_lang_idx, lang_ptrs.data(), static_cast<int>(lang_ptrs.size()));
+    ImGui::PushItemWidth(180.0f);
+    ImGui::Combo("Out Lang", &m_out_lang_idx, m_active_lang_ptrs.data(), static_cast<int>(m_active_lang_ptrs.size()));
     ImGui::PopItemWidth();
-
-    ImGui::SameLine(0, 15.0f);
 
     if (m_input_source_idx == 2) {
-        ImGui::PushItemWidth(160.0f);
+        ImGui::SameLine(0, 15.0f);
+        ImGui::PushItemWidth(180.0f);
         ImGui::InputText("Doc Path", m_doc_path_buf, sizeof(m_doc_path_buf));
         ImGui::PopItemWidth();
 
@@ -462,32 +545,69 @@ void AppUI::render_controls_panel() {
                 m_status_is_error = true;
             }
         }
-        ImGui::SameLine(0, 15.0f);
     }
 
+    // USER DIRECTIVE / PROMPT INSTRUCTIONS SECTION
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "AI Directive / Custom Instructions (Optional):");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(Direct AI style, tone, terminology, or constraints)");
+
+    float avail_width = ImGui::GetContentRegionAvail().x;
+    float buttons_width = 300.0f;
+    float input_width = std::max(220.0f, avail_width - buttons_width);
+
+    ImGui::PushItemWidth(input_width);
+    InputTextWithHintStdString(
+        "##CustomDirective",
+        "e.g. 'Use formal tone', 'Keep technical terms in English', 'Only correct punctuation'...",
+        &m_custom_directive
+    );
+    ImGui::PopItemWidth();
+
+    ImGui::SameLine(0, 8.0f);
+    if (ImGui::Button("Formal", ImVec2(65, 0))) {
+        m_custom_directive = "Use a formal, polite, and professional tone throughout.";
+    }
+    ImGui::SameLine(0, 4.0f);
+    if (ImGui::Button("Casual", ImVec2(65, 0))) {
+        m_custom_directive = "Use a natural, conversational, and casual tone.";
+    }
+    ImGui::SameLine(0, 4.0f);
+    if (ImGui::Button("Technical", ImVec2(80, 0))) {
+        m_custom_directive = "Preserve all technical terminology, acronyms, and code identifiers verbatim.";
+    }
+    ImGui::SameLine(0, 4.0f);
+    if (ImGui::Button("Clear", ImVec2(55, 0))) {
+        m_custom_directive.clear();
+    }
+    ImGui::Spacing();
+
+    // ACTION BUTTONS SECTION
     bool generating = m_engine->is_generating();
     bool loading_model = m_engine->is_loading_model();
 
     if (generating) {
-        // Red Stop / Abort Button
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.18f, 0.18f, 1.0f));
-        if (ImGui::Button(" STOP ", ImVec2(120, 32))) {
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.98f, 0.28f, 0.28f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.70f, 0.12f, 0.12f, 1.0f));
+        if (ImGui::Button(" STOP / CANCEL ", ImVec2(150, 36))) {
             m_engine->abort();
             m_status_msg = "Abort requested.";
             m_status_is_error = true;
         }
-        ImGui::PopStyleColor();
+        ImGui::PopStyleColor(3);
     }
     else {
         if (!m_engine->is_model_loaded() || loading_model) ImGui::BeginDisabled();
 
-        // RED "TRANSLATE" BUTTON
+        // TRANSLATE BUTTON
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.18f, 0.18f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.98f, 0.28f, 0.28f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.70f, 0.12f, 0.12f, 1.0f));
 
-        if (ImGui::Button(" TRANSLATE ", ImVec2(140, 32))) {
-            if (m_input_source_idx == 1) { // System Clipboard
+        if (ImGui::Button(" TRANSLATE ", ImVec2(150, 36))) {
+            if (m_input_source_idx == 1) {
                 const char* clipboard_text = ImGui::GetClipboardText();
                 if (clipboard_text && std::strlen(clipboard_text) > 0) {
                     m_input_text = clipboard_text;
@@ -499,16 +619,12 @@ void AppUI::render_controls_panel() {
             }
 
             if (!m_input_text.empty()) {
+                const auto& active_langs = get_active_model_supported_languages();
                 std::string in_lang = active_langs[m_in_lang_idx];
                 std::string out_lang = active_langs[m_out_lang_idx];
 
-                if (m_engine->start_translation_task(in_lang, out_lang, m_input_text)) {
-                    if (in_lang == out_lang) {
-                        m_status_msg = "Correcting " + in_lang + " grammar & orthography...";
-                    }
-                    else {
-                        m_status_msg = "Translating " + in_lang + " to " + out_lang + "...";
-                    }
+                if (m_engine->start_translation_task(in_lang, out_lang, m_input_text, m_custom_directive)) {
+                    m_status_msg = "Translating " + in_lang + " to " + out_lang + "...";
                     m_status_is_error = false;
                 }
                 else {
@@ -517,17 +633,49 @@ void AppUI::render_controls_panel() {
                 }
             }
         }
-
         ImGui::PopStyleColor(3);
 
-        ImGui::SameLine(0, 10.0f);
+        ImGui::SameLine(0, 12.0f);
 
-        if (ImGui::Button("Retry Mistake", ImVec2(110, 32))) {
+        // AUTO-CORRECT TYPOS BUTTON
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.60f, 0.85f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.70f, 0.98f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.48f, 0.70f, 1.0f));
+
+        if (ImGui::Button(" AUTO-CORRECT TYPOS ", ImVec2(200, 36))) {
+            if (m_input_source_idx == 1) {
+                const char* clipboard_text = ImGui::GetClipboardText();
+                if (clipboard_text && std::strlen(clipboard_text) > 0) {
+                    m_input_text = clipboard_text;
+                }
+            }
+
+            if (!m_input_text.empty()) {
+                const auto& active_langs = get_active_model_supported_languages();
+                std::string in_lang = active_langs[m_in_lang_idx];
+
+                if (m_engine->start_auto_correct_task(in_lang, m_input_text, m_custom_directive)) {
+                    m_status_msg = "Fixing typos & grammar in " + in_lang + "...";
+                    m_status_is_error = false;
+                }
+                else {
+                    m_status_msg = m_engine->get_last_error();
+                    m_status_is_error = true;
+                }
+            }
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 12.0f);
+
+        if (ImGui::Button("Retry Mistake", ImVec2(130, 36))) {
             m_engine->clear_output_text();
+            m_output_text.clear();
+            const auto& active_langs = get_active_model_supported_languages();
             std::string in_lang = active_langs[m_in_lang_idx];
             std::string out_lang = active_langs[m_out_lang_idx];
 
-            if (m_engine->start_translation_task(in_lang, out_lang, m_input_text)) {
+            if (m_engine->start_translation_task(in_lang, out_lang, m_input_text, m_custom_directive)) {
                 m_status_msg = "Retrying generation...";
                 m_status_is_error = false;
             }
@@ -540,10 +688,18 @@ void AppUI::render_controls_panel() {
         if (!m_engine->is_model_loaded() || loading_model) ImGui::EndDisabled();
     }
 
-    ImGui::SameLine(0, 10.0f);
-    if (ImGui::Button("Clear All", ImVec2(80, 32))) {
+    ImGui::SameLine(0, 12.0f);
+    if (ImGui::Button("Clear All", ImVec2(90, 36))) {
         m_input_text.clear();
         m_engine->clear_output_text();
+        m_output_text.clear();
+        m_cached_input_words = 0;
+        m_cached_input_chars = 0;
+        m_cached_output_words = 0;
+        m_cached_output_chars = 0;
+        m_last_input_size = 0;
+        m_status_msg = "Cleared editors.";
+        m_status_is_error = false;
     }
 }
 
@@ -552,7 +708,6 @@ void AppUI::render_text_editors_panel() {
     float avail_height = ImGui::GetContentRegionAvail().y - 35.0f;
     float box_width = (avail_width - 15.0f) * 0.5f;
 
-    // Left Column: Source Input Box
     ImGui::BeginChild("InputGroup", ImVec2(box_width, avail_height), true);
     ImGui::TextUnformatted("Source Input Text:");
 
@@ -562,34 +717,31 @@ void AppUI::render_text_editors_panel() {
         if (clip) m_input_text = clip;
     }
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 150.0f);
-    ImGui::TextDisabled("Words: %zu | Chars: %zu", count_words(m_input_text), m_input_text.size());
+    ImGui::SameLine(ImGui::GetWindowWidth() - 170.0f);
+    ImGui::TextDisabled("Words: %zu | Chars: %zu", m_cached_input_words, m_cached_input_chars);
 
     InputTextMultilineStdString("##SourceText", &m_input_text, ImVec2(-FLT_MIN, -FLT_MIN));
     ImGui::EndChild();
 
     ImGui::SameLine();
 
-    // Right Column: Output Read-Only Box
     ImGui::BeginChild("OutputGroup", ImVec2(box_width, avail_height), true);
-    std::string output_text = m_engine->get_output_text();
-
-    ImGui::TextUnformatted("Translated Output Text:");
+    ImGui::TextUnformatted("Translated / Corrected Output Text:");
     ImGui::SameLine();
     ImGui::Checkbox("Auto-Scroll", &m_auto_scroll);
 
     ImGui::SameLine();
     if (ImGui::SmallButton("Copy Output")) {
-        ImGui::SetClipboardText(output_text.c_str());
+        ImGui::SetClipboardText(m_output_text.c_str());
         m_status_msg = "Copied output to system clipboard!";
         m_status_is_error = false;
     }
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 150.0f);
-    ImGui::TextDisabled("Words: %zu | Chars: %zu", count_words(output_text), output_text.size());
+    ImGui::SameLine(ImGui::GetWindowWidth() - 170.0f);
+    ImGui::TextDisabled("Words: %zu | Chars: %zu", m_cached_output_words, m_cached_output_chars);
 
     ImGuiInputTextFlags out_flags = ImGuiInputTextFlags_ReadOnly;
-    InputTextMultilineStdString("##OutputText", &output_text, ImVec2(-FLT_MIN, -FLT_MIN), out_flags);
+    InputTextMultilineStdString("##OutputText", &m_output_text, ImVec2(-FLT_MIN, -FLT_MIN), out_flags);
 
     if (m_auto_scroll && m_engine->is_generating()) {
         ImGui::SetScrollHereY(1.0f);

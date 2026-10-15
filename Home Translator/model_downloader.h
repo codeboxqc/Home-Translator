@@ -24,7 +24,7 @@ public:
     ModelDownloader();
     ~ModelDownloader();
 
-    static std::vector<ModelPreset> get_presets();
+    static const std::vector<ModelPreset>& get_presets();
 
     bool start_download(const ModelPreset& preset);
     void cancel_download();
@@ -36,7 +36,6 @@ public:
     bool is_completed() const;
     void reset_completed_flag();
 
-    // Internal callbacks for libcurl
     bool is_cancel_requested() const;
     void update_progress(uint64_t dlnow, uint64_t dltotal);
 
