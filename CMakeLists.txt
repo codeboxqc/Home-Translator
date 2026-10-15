@@ -52,22 +52,15 @@ include_directories(
 )
 
 # --- ImGui Source Files ---
-file(GLOB IMGUI_SOURCES
-    "imgui/*.cpp"
+# Explicitly list the files instead of using GLOB to prevent silent linking errors
+set(IMGUI_SOURCES
+    "imgui/imgui.cpp"
+    "imgui/imgui_draw.cpp"
+    "imgui/imgui_tables.cpp"
+    "imgui/imgui_widgets.cpp"
     "imgui/backends/imgui_impl_sdl3.cpp"
     "imgui/backends/imgui_impl_opengl3.cpp"
 )
-
-if(NOT IMGUI_SOURCES)
-    file(GLOB IMGUI_SOURCES
-        "imgui.cpp"
-        "imgui_draw.cpp"
-        "imgui_tables.cpp"
-        "imgui_widgets.cpp"
-        "imgui_impl_sdl3.cpp"
-        "imgui_impl_opengl3.cpp"
-    )
-endif()
 
 # --- Project Sources ---
 set(APP_SOURCES
