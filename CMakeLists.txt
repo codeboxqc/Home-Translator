@@ -26,12 +26,25 @@ find_package(OpenGL REQUIRED)
 # Find SDL3
 find_package(SDL3 REQUIRED)
 
+# --- Download libinfer files ---
+set(LIBINFER_URL_BASE "https://raw.githubusercontent.com/codeboxqc/libinfer/21adde4")
+set(LIBINFER_DIR "${CMAKE_CURRENT_BINARY_DIR}/libinfer")
+
+file(MAKE_DIRECTORY ${LIBINFER_DIR})
+file(DOWNLOAD "${LIBINFER_URL_BASE}/infer.h" "${LIBINFER_DIR}/infer.h" SHOW_PROGRESS)
+
+if(WIN32)
+    file(DOWNLOAD "${LIBINFER_URL_BASE}/infer.lib" "${LIBINFER_DIR}/infer.lib" SHOW_PROGRESS)
+    file(DOWNLOAD "${LIBINFER_URL_BASE}/infer.dll" "${CMAKE_CURRENT_BINARY_DIR}/infer.dll" SHOW_PROGRESS)
+endif()
+
 # Include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CURL_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIR}
     ${SDL3_INCLUDE_DIRS}
+    ${LIBINFER_DIR}
 )
 
 # ImGui Source Files (Place imgui files in imgui/ or current directory)
@@ -72,9 +85,9 @@ target_link_libraries(HomeTranslator PRIVATE
     SDL3::SDL3
 )
 
-# Link libinfer
+# --- Link libinfer ---
 if(WIN32)
-    target_link_libraries(HomeTranslator PRIVATE infer ws2_32)
+    target_link_libraries(HomeTranslator PRIVATE "${LIBINFER_DIR}/infer.lib" ws2_32)
 else()
     target_link_libraries(HomeTranslator PRIVATE infer pthread dl)
 endif()
