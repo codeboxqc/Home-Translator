@@ -10,6 +10,7 @@ on:
 jobs:
   build:
     strategy:
+    fail-fast: false
       matrix:
         # Define the operating systems we want to build on
         os: [windows-latest, ubuntu-latest]
