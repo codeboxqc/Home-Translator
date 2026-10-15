@@ -36,10 +36,10 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y pkg-config libx11-dev libxext-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libwayland-dev libxkbcommon-dev libgl1-mesa-dev
 
-    # Install CURL and SDL3 using vcpkg for the specific OS triplet
+    # Install CURL, SDL3, and ImGui using vcpkg for the specific OS triplet
     - name: Install Dependencies
       run: |
-        vcpkg install curl:${{ matrix.triplet }} sdl3:${{ matrix.triplet }}
+        vcpkg install curl:${{ matrix.triplet }} sdl3:${{ matrix.triplet }} imgui[sdl3-binding,opengl3-binding]:${{ matrix.triplet }}
         vcpkg integrate install
 
     # Configure CMake (uses bash on Linux, PowerShell on Windows)
