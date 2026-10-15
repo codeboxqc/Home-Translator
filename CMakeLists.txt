@@ -26,19 +26,29 @@ find_package(OpenGL REQUIRED)
 # Find SDL3
 find_package(SDL3 REQUIRED)
 
-# --- Download libinfer files ---
-set(LIBINFER_URL_BASE "https://raw.githubusercontent.com/codeboxqc/libinfer/21adde4")
+# --- Download and Extract libinfer Release ---
 set(LIBINFER_DIR "${CMAKE_CURRENT_BINARY_DIR}/libinfer")
-
 file(MAKE_DIRECTORY ${LIBINFER_DIR})
-file(DOWNLOAD "${LIBINFER_URL_BASE}/infer.h" "${LIBINFER_DIR}/infer.h" SHOW_PROGRESS)
 
+# Determine which zip file to download based on the OS
 if(WIN32)
-    file(DOWNLOAD "${LIBINFER_URL_BASE}/infer.lib" "${LIBINFER_DIR}/infer.lib" SHOW_PROGRESS)
-    file(DOWNLOAD "${LIBINFER_URL_BASE}/infer.dll" "${CMAKE_CURRENT_BINARY_DIR}/infer.dll" SHOW_PROGRESS)
+    set(LIBINFER_ZIP_URL "https://github.com/codeboxqc/libinfer/releases/download/latest/libinfer-windows-x64.zip")
+else()
+    set(LIBINFER_ZIP_URL "https://github.com/codeboxqc/libinfer/releases/download/latest/libinfer-linux-x64.zip")
 endif()
 
-# Include directories (Updated to include ImGui and libinfer)
+set(LIBINFER_ZIP_FILE "${CMAKE_CURRENT_BINARY_DIR}/libinfer.zip")
+
+# Download the zip archive
+file(DOWNLOAD "${LIBINFER_ZIP_URL}" "${LIBINFER_ZIP_FILE}" SHOW_PROGRESS)
+
+# Extract the archive into the libinfer folder using CMake's built-in tar tool
+execute_process(
+    COMMAND ${CMAKE_COMMAND} -E tar xf "${LIBINFER_ZIP_FILE}"
+    WORKING_DIRECTORY ${LIBINFER_DIR}
+)
+
+# --- Include directories ---
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CURL_INCLUDE_DIRS}
@@ -49,7 +59,8 @@ include_directories(
     "${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends"
 )
 
-# ImGui Source Files (Place imgui files in imgui/ or current directory)
+# --- ImGui Source Files ---
+# Place imgui files in imgui/ or current directory
 file(GLOB IMGUI_SOURCES
     "imgui/*.cpp"
     "imgui/backends/imgui_impl_sdl3.cpp"
@@ -68,9 +79,9 @@ if(NOT IMGUI_SOURCES)
     )
 endif()
 
-# Project Sources (Fixed filename spacing)
+# --- Project Sources ---
 set(APP_SOURCES
-    "HomeTranslator.cpp" 
+    "HomeTranslator.cpp"
     "ai_engine.cpp"
     "app_ui.cpp"
     "doc_parser.cpp"
@@ -80,18 +91,26 @@ set(APP_SOURCES
 
 add_executable(HomeTranslator ${APP_SOURCES})
 
-# Target Link Libraries
+# Target Link Libraries (Dependencies)
 target_link_libraries(HomeTranslator PRIVATE
     ${CURL_LIBRARIES}
     OpenGL::GL
     SDL3::SDL3
 )
 
-# --- Link libinfer ---
+# --- Link and Copy libinfer Binaries ---
 if(WIN32)
+    # Link the Windows .lib
     target_link_libraries(HomeTranslator PRIVATE "${LIBINFER_DIR}/infer.lib" ws2_32)
+    
+    # Copy the .dll next to the executable so it runs correctly
+    file(COPY "${LIBINFER_DIR}/infer.dll" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
 else()
-    target_link_libraries(HomeTranslator PRIVATE infer pthread dl)
+    # Link the Linux .so
+    target_link_libraries(HomeTranslator PRIVATE "${LIBINFER_DIR}/libinfer.so" pthread dl)
+    
+    # Copy the .so next to the executable so it runs correctly
+    file(COPY "${LIBINFER_DIR}/libinfer.so" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
 
 # Copy models folder next to binary
