@@ -17,23 +17,10 @@ else()
     add_compile_options(-O3 -Wall -Wextra -pthread)
 endif()
 
-# Find vcpkg packages
+# Find vcpkg packages (Only CURL and SDL3)
 find_package(CURL REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(SDL3 REQUIRED)
-find_package(imgui CONFIG REQUIRED)
-
-# --- Find vcpkg ImGui Bindings ---
-# vcpkg provides the backend .cpp files but doesn't compile them. We must find them.
-find_path(IMGUI_BACKENDS_DIR 
-    NAMES imgui_impl_sdl3.cpp 
-    PATH_SUFFIXES imgui/backends imgui
-)
-
-set(IMGUI_BACKEND_SOURCES
-    "${IMGUI_BACKENDS_DIR}/imgui_impl_sdl3.cpp"
-    "${IMGUI_BACKENDS_DIR}/imgui_impl_opengl3.cpp"
-)
 
 # --- Download and Extract libinfer Release ---
 set(LIBINFER_DIR "${CMAKE_CURRENT_BINARY_DIR}/libinfer")
@@ -60,8 +47,27 @@ include_directories(
     ${OPENGL_INCLUDE_DIR}
     ${SDL3_INCLUDE_DIRS}
     ${LIBINFER_DIR}
-    ${IMGUI_BACKENDS_DIR} # Include the bindings folder
+    "${CMAKE_CURRENT_SOURCE_DIR}/imgui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends"
 )
+
+# --- ImGui Source Files ---
+file(GLOB IMGUI_SOURCES
+    "imgui/*.cpp"
+    "imgui/backends/imgui_impl_sdl3.cpp"
+    "imgui/backends/imgui_impl_opengl3.cpp"
+)
+
+if(NOT IMGUI_SOURCES)
+    file(GLOB IMGUI_SOURCES
+        "imgui.cpp"
+        "imgui_draw.cpp"
+        "imgui_tables.cpp"
+        "imgui_widgets.cpp"
+        "imgui_impl_sdl3.cpp"
+        "imgui_impl_opengl3.cpp"
+    )
+endif()
 
 # --- Project Sources ---
 set(APP_SOURCES
@@ -70,7 +76,7 @@ set(APP_SOURCES
     "app_ui.cpp"
     "doc_parser.cpp"
     "model_downloader.cpp"
-    ${IMGUI_BACKEND_SOURCES} # Compile the ImGui bindings
+    ${IMGUI_SOURCES}
 )
 
 add_executable(HomeTranslator ${APP_SOURCES})
@@ -80,7 +86,6 @@ target_link_libraries(HomeTranslator PRIVATE
     ${CURL_LIBRARIES}
     OpenGL::GL
     SDL3::SDL3
-    imgui::imgui   # Link the core ImGui library
 )
 
 # --- Link and Copy libinfer Binaries ---
