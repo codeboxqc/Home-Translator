@@ -110,6 +110,13 @@ bool ModelDownloader::start_download(const ModelPreset& preset) {
         m_worker_thread.join();
     }
 
+    {
+        std::lock_guard<std::mutex> lock(m_status_mutex);
+        m_active_download_filename = preset.filename;
+        m_status_message = "Connecting to HuggingFace for " + preset.name + "...";
+        m_downloaded_filepath.clear();
+    }
+
     m_is_downloading.store(true);
     m_cancel_requested.store(false);
     m_completed.store(false);
@@ -118,12 +125,6 @@ bool ModelDownloader::start_download(const ModelPreset& preset) {
     m_bytes_total.store(0);
     m_start_time = std::chrono::steady_clock::now();
     m_last_ui_update = m_start_time - std::chrono::seconds(1);
-
-    {
-        std::lock_guard<std::mutex> lock(m_status_mutex);
-        m_status_message = "Connecting to HuggingFace for " + preset.name + "...";
-        m_downloaded_filepath.clear();
-    }
 
     m_worker_thread = std::thread(&ModelDownloader::download_thread_proc, this, preset);
     return true;
@@ -170,23 +171,28 @@ void ModelDownloader::download_thread_proc(ModelPreset preset) {
     fs::path target_path = fs::absolute(fs::path("models") / preset.filename);
     std::string out_path = target_path.string();
 
-    // Allocate 2 MB disk buffer BEFORE std::ofstream so buffer outlives file stream on scope exit
     std::vector<char> disk_io_buffer(2 * 1024 * 1024);
     std::ofstream out_file;
     out_file.rdbuf()->pubsetbuf(disk_io_buffer.data(), static_cast<std::streamsize>(disk_io_buffer.size()));
     out_file.open(out_path, std::ios::binary);
 
     if (!out_file.is_open()) {
-        std::lock_guard<std::mutex> lock(m_status_mutex);
-        m_status_message = "Error: Could not open output file for writing at " + out_path;
+        {
+            std::lock_guard<std::mutex> lock(m_status_mutex);
+            m_status_message = "Error: Could not open output file for writing at " + out_path;
+            m_active_download_filename.clear();
+        }
         m_is_downloading.store(false);
         return;
     }
 
     CURL* curl = curl_easy_init();
     if (!curl) {
-        std::lock_guard<std::mutex> lock(m_status_mutex);
-        m_status_message = "Error: Failed to initialize libcurl handle.";
+        {
+            std::lock_guard<std::mutex> lock(m_status_mutex);
+            m_status_message = "Error: Failed to initialize libcurl handle.";
+            m_active_download_filename.clear();
+        }
         out_file.close();
         fs::remove(out_path);
         m_is_downloading.store(false);
@@ -235,6 +241,10 @@ void ModelDownloader::download_thread_proc(ModelPreset preset) {
         m_progress.store(0.0f);
     }
 
+    {
+        std::lock_guard<std::mutex> lock(m_status_mutex);
+        m_active_download_filename.clear();
+    }
     m_is_downloading.store(false);
 }
 
@@ -254,6 +264,11 @@ std::string ModelDownloader::get_status_message() const {
 std::string ModelDownloader::get_downloaded_filepath() const {
     std::lock_guard<std::mutex> lock(m_status_mutex);
     return m_downloaded_filepath;
+}
+
+std::string ModelDownloader::get_active_filename() const {
+    std::lock_guard<std::mutex> lock(m_status_mutex);
+    return m_active_download_filename;
 }
 
 bool ModelDownloader::is_completed() const {

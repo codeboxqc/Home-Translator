@@ -1,5 +1,6 @@
 /* ========================================================================== */
 /* app_ui.h                                                                   */
+/* Clean, Popup-Free, 100% Responsive UI Layout                               */
 /* ========================================================================== */
 #ifndef APP_UI_H
 #define APP_UI_H
@@ -36,8 +37,7 @@ private:
     void rebuild_diff_tokens();
 
     void render_donation_button();
-    void render_download_modal();
-    void render_startup_gpu_dialog();
+    void render_download_window();
     void render_header_panel();
     void render_controls_panel();
     void render_glossary_drawer();
@@ -92,8 +92,8 @@ private:
     int m_input_source_idx = 0;
     int m_ctx_size = 0;
 
-    bool m_show_startup_gpu_dialog = true;
-    bool m_show_download_modal = false;
+    // Non-blocking download window toggle
+    bool m_show_download_window = false;
     bool m_auto_scroll = true;
     std::string m_status_msg;
     bool m_status_is_error = false;

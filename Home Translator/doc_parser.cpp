@@ -12,6 +12,13 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -33,6 +40,40 @@ namespace {
         replace_all(s, "&#39;", "'");
         replace_all(s, "&nbsp;", " ");
         return s;
+    }
+
+    int execute_tool_silent(const std::string& cmd_line) {
+#if defined(_WIN32)
+        STARTUPINFOA si{};
+        PROCESS_INFORMATION pi{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+
+        std::vector<char> cmd_buf(cmd_line.begin(), cmd_line.end());
+        cmd_buf.push_back('\0');
+
+        if (!CreateProcessA(nullptr, cmd_buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            return -1;
+        }
+        // 10-second timeout avoids hanging the application
+        DWORD wait_res = WaitForSingleObject(pi.hProcess, 10000);
+        if (wait_res == WAIT_TIMEOUT) {
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return -1;
+        }
+
+        DWORD exit_code = 1;
+        GetExitCodeProcess(pi.hProcess, &exit_code);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return static_cast<int>(exit_code);
+#else
+        std::string redirected = cmd_line + " >/dev/null 2>&1";
+        return std::system(redirected.c_str());
+#endif
     }
 } // anonymous namespace
 
@@ -108,7 +149,6 @@ bool DocParser::save_document(
         return false;
     }
 
-    // If we have cached SRT cues and user exports to .srt/.vtt, reconstruct timecodes
     FileType ft = detect_file_type(filepath);
     if (!srt_cues.empty() && ft == FileType::SUBTITLE) {
         std::vector<std::string> translated_blocks;
@@ -133,7 +173,6 @@ bool DocParser::save_document(
             out << srt_cues[i].timecode << "\n";
             if (i < translated_blocks.size()) {
                 std::string clean_line = translated_blocks[i];
-                // Strip optional [Cue #] prefix if preserved by AI
                 if (!clean_line.empty() && clean_line[0] == '[') {
                     size_t close_br = clean_line.find("] ");
                     if (close_br != std::string::npos && close_br < 16) {
@@ -188,7 +227,6 @@ bool DocParser::read_text_file(const std::string& filepath, std::string& out_tex
         return false;
     }
 
-    // Strip UTF-8 Byte Order Mark (BOM) if present
     if (out_text.size() >= 3 &&
         static_cast<unsigned char>(out_text[0]) == 0xEF &&
         static_cast<unsigned char>(out_text[1]) == 0xBB &&
@@ -337,12 +375,7 @@ bool DocParser::read_docx_file(const std::string& filepath, std::string& out_tex
     fs::create_directories(temp_dir, ec);
 
     std::string cmd = "tar -xf \"" + filepath + "\" -C \"" + temp_dir.string() + "\" word/document.xml";
-#if defined(_WIN32)
-    cmd += " >NUL 2>&1";
-#else
-    cmd += " >/dev/null 2>&1";
-#endif
-    int rc = std::system(cmd.c_str());
+    int rc = execute_tool_silent(cmd);
     fs::path doc_xml = temp_dir / "word" / "document.xml";
 
     if (rc != 0 || !fs::exists(doc_xml)) {
@@ -367,12 +400,7 @@ bool DocParser::read_epub_file(const std::string& filepath, std::string& out_tex
     fs::create_directories(temp_dir, ec);
 
     std::string cmd = "tar -xf \"" + filepath + "\" -C \"" + temp_dir.string() + "\"";
-#if defined(_WIN32)
-    cmd += " >NUL 2>&1";
-#else
-    cmd += " >/dev/null 2>&1";
-#endif
-    std::system(cmd.c_str());
+    execute_tool_silent(cmd);
 
     std::vector<fs::path> chapters;
     for (const auto& entry : fs::recursive_directory_iterator(temp_dir, ec)) {
@@ -421,12 +449,7 @@ bool DocParser::read_pdf_file(const std::string& filepath, std::string& out_text
     if (std::strncmp(header, "%PDF", 4) == 0) {
         fs::path temp_txt = fs::temp_directory_path() / "home_translator_pdf_tmp.txt";
         std::string cmd = "pdftotext -enc UTF-8 \"" + filepath + "\" \"" + temp_txt.string() + "\"";
-#if defined(_WIN32)
-        cmd += " >NUL 2>&1";
-#else
-        cmd += " >/dev/null 2>&1";
-#endif
-        if (std::system(cmd.c_str()) == 0 && fs::exists(temp_txt)) {
+        if (execute_tool_silent(cmd) == 0 && fs::exists(temp_txt)) {
             bool ok = read_text_file(temp_txt.string(), out_text, out_error);
             std::error_code ec;
             fs::remove(temp_txt, ec);

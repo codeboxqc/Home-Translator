@@ -168,6 +168,12 @@ bool AIEngine::load_model_async(const std::string& model_path, uint32_t requeste
                 m_model_loaded.store(false);
             }
             else {
+                // Configure standard stop sequences across all supported models
+                static const char* const s_default_stops[] = {
+                    "<|im_end|>", "<|endoftext|>", "<|eot_id|>", "</s>", "<|end|>", "<|user|>"
+                };
+                (void)infer_set_stop_sequences(m_ctx, s_default_stops, sizeof(s_default_stops) / sizeof(s_default_stops[0]));
+
                 infer_model_info info{};
                 info.struct_size = sizeof(infer_model_info);
                 if (infer_get_model_info(m_ctx, &info) && info.n_ctx_active > 0) {
@@ -534,8 +540,6 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
     std::string prev_assistant_tail;
     std::string loaded_model = get_loaded_model_path();
 
-    (void)infer_memory_clear(m_ctx);
-
     for (size_t i = 0; i < chunks.size(); ++i) {
         if (!m_is_task_running.load()) break;
 
@@ -635,7 +639,6 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
         }
     }
 
-    (void)infer_memory_clear(m_ctx);
     m_is_task_running.store(false);
 }
 
@@ -643,9 +646,39 @@ bool AIEngine::stream_callback_v2(const char* piece, size_t len, void* user_data
     if (!piece || len == 0 || !user_data) return true;
     AIEngine* engine = static_cast<AIEngine*>(user_data);
 
+    // Abort decode loop immediately if task cancellation was signaled
+    if (!engine->m_is_task_running.load(std::memory_order_relaxed)) {
+        return false;
+    }
+
+    std::string_view slice(piece, len);
+
+    // Immediate terminator check: halt decoding the instant the model hits an EOG token
+    if (slice == "<|im_end|>" || slice == "<|eot_id|>" ||
+        slice == "<|endoftext|>" || slice == "</s>" || slice == "<|end|>") {
+        return false;
+    }
+
     std::lock_guard<std::mutex> lock(engine->m_output_mutex);
     engine->m_output_buffer.append(piece, len);
     engine->m_current_chunk_buffer.append(piece, len);
+
+    // Scan trailing boundary of buffer for partial or concatenated stop sequences
+    static const std::string_view s_stops[] = {
+        "<|im_end|>", "<|eot_id|>", "<|endoftext|>", "</s>", "<|end|>"
+    };
+    for (const auto& stop : s_stops) {
+        if (engine->m_output_buffer.size() >= stop.size()) {
+            size_t pos = engine->m_output_buffer.rfind(stop);
+            if (pos != std::string::npos && pos + stop.size() == engine->m_output_buffer.size()) {
+                engine->m_output_buffer.erase(pos);
+                engine->m_output_dirty = true;
+                engine->m_output_revision++;
+                return false; // Stop decoding immediately
+            }
+        }
+    }
+
     engine->m_output_dirty = true;
     engine->m_output_revision++;
     return true;

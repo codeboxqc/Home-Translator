@@ -34,6 +34,7 @@ public:
     float get_progress() const;
     std::string get_status_message() const;
     std::string get_downloaded_filepath() const;
+    std::string get_active_filename() const;
     bool is_completed() const;
     void reset_completed_flag();
 
@@ -56,6 +57,7 @@ private:
     mutable std::mutex m_status_mutex;
     std::string m_status_message;
     std::string m_downloaded_filepath;
+    std::string m_active_download_filename;
 
     std::thread m_worker_thread;
 };
