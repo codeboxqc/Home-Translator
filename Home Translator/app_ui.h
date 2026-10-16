@@ -12,6 +12,9 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 struct DiffToken {
     enum Type { Same, Removed, Added } type;
@@ -97,6 +100,15 @@ private:
     bool m_auto_scroll = true;
     std::string m_status_msg;
     bool m_status_is_error = false;
+
+    // Async doc loading state
+    std::mutex m_file_load_mutex;
+    std::atomic<bool> m_file_load_pending{false};
+    std::string m_async_loaded_content;
+    std::vector<SubtitleCue> m_async_loaded_cues;
+    std::string m_async_loaded_path;
+    DocParser::FileType m_async_loaded_ft;
+    std::string m_async_loaded_error;
 };
 
 #endif // APP_UI_H

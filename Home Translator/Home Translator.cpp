@@ -296,9 +296,27 @@ namespace {
     }
 } // anonymous namespace
 
+#ifdef _WIN32
+static void disable_quickedit()
+{
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    if (h == nullptr || h == INVALID_HANDLE_VALUE) return;
+    DWORD mode = 0;
+    if (GetConsoleMode(h, &mode)) {
+        mode &= ~ENABLE_QUICK_EDIT_MODE;
+        mode |= ENABLE_EXTENDED_FLAGS;
+        SetConsoleMode(h, mode);
+    }
+}
+#endif
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
+
+#ifdef _WIN32
+    disable_quickedit();
+#endif
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "Fatal Error: SDL_Init failed: %s\n", SDL_GetError());
@@ -393,6 +411,7 @@ int main(int argc, char** argv) {
             }
             if (event.type == SDL_EVENT_DROP_FILE) {
                 app_ui.handle_file_drop(event.drop.data);
+                SDL_free((void*)event.drop.data);
             }
         }
 

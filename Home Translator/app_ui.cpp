@@ -278,30 +278,23 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
     if (!dropped_filepath) return;
 
     std::string path(dropped_filepath);
-    std::string error, loaded_content;
-    m_loaded_srt_cues.clear();
+    m_status_msg = "Loading document... (Please wait)";
+    m_status_is_error = false;
 
-    if (DocParser::load_document(path, loaded_content, error, &m_loaded_srt_cues)) {
-        m_input_text = loaded_content;
-        snprintf(m_doc_path_buf, sizeof(m_doc_path_buf), "%s", path.c_str());
-
+    std::thread([this, path]() {
+        std::string error, loaded_content;
+        std::vector<SubtitleCue> cues;
+        bool success = DocParser::load_document(path, loaded_content, error, &cues);
         DocParser::FileType ft = DocParser::detect_file_type(path);
-        if (ft == DocParser::FileType::SUBTITLE || ft == DocParser::FileType::LOCALIZATION) {
-            m_preserve_code_keys = true;
-        }
-        if (ft == DocParser::FileType::SUBTITLE) {
-            snprintf(m_export_path_buf, sizeof(m_export_path_buf), "%s", (path + ".translated.srt").c_str());
-        }
 
-        m_input_source_idx = 2;
-        m_status_msg = "Loaded file into editor: " + path +
-            (!m_loaded_srt_cues.empty() ? " (" + std::to_string(m_loaded_srt_cues.size()) + " subtitle cues locked)" : "");
-        m_status_is_error = false;
-    }
-    else {
-        m_status_msg = "Document error: " + error;
-        m_status_is_error = true;
-    }
+        std::lock_guard<std::mutex> lock(m_file_load_mutex);
+        m_async_loaded_content = std::move(loaded_content);
+        m_async_loaded_cues = std::move(cues);
+        m_async_loaded_path = path;
+        m_async_loaded_ft = ft;
+        m_async_loaded_error = std::move(error);
+        m_file_load_pending.store(true);
+    }).detach();
 }
 
 void AppUI::trigger_hotkey_clipboard_translate() {
@@ -350,6 +343,10 @@ void AppUI::dispatch_ai_task(AITaskMode mode, bool is_retry) {
 
     m_last_task_mode = mode;
 
+    // Clear the output string here so that delta updates don't keep appending to previous session
+    m_output_text.clear();
+    m_output_revision = 0;
+
     if (m_engine->start_task(m_input_text, opts)) {
         m_status_msg = is_retry ? "Retrying with boosted sampling temperature..." : "Running AI task...";
         m_status_is_error = false;
@@ -362,6 +359,34 @@ void AppUI::dispatch_ai_task(AITaskMode mode, bool is_retry) {
 
 void AppUI::render() {
     double now = ImGui::GetTime();
+
+    if (m_file_load_pending.load()) {
+        std::lock_guard<std::mutex> lock(m_file_load_mutex);
+
+        if (m_async_loaded_error.empty()) {
+            m_input_text = std::move(m_async_loaded_content);
+            m_loaded_srt_cues = std::move(m_async_loaded_cues);
+            snprintf(m_doc_path_buf, sizeof(m_doc_path_buf), "%s", m_async_loaded_path.c_str());
+
+            if (m_async_loaded_ft == DocParser::FileType::SUBTITLE || m_async_loaded_ft == DocParser::FileType::LOCALIZATION) {
+                m_preserve_code_keys = true;
+            }
+            if (m_async_loaded_ft == DocParser::FileType::SUBTITLE) {
+                snprintf(m_export_path_buf, sizeof(m_export_path_buf), "%s", (m_async_loaded_path + ".translated.srt").c_str());
+            }
+
+            m_input_source_idx = 2;
+            m_status_msg = "Loaded file into editor: " + m_async_loaded_path +
+                (!m_loaded_srt_cues.empty() ? " (" + std::to_string(m_loaded_srt_cues.size()) + " subtitle cues locked)" : "");
+            m_status_is_error = false;
+        } else {
+            m_status_msg = "Document error: " + m_async_loaded_error;
+            m_status_is_error = true;
+        }
+
+        m_file_load_pending.store(false);
+    }
+
     bool output_updated = m_engine->get_output_text_if_dirty(m_output_text, m_output_revision);
 
     if (output_updated) {
