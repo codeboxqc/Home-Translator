@@ -1,6 +1,5 @@
 /* ========================================================================== */
 /* ai_engine.cpp                                                              */
-/* High-Speed Pro Engine: Prefix KV Reuse, Greedy Fast-Path & v2 Streaming    */
 /* ========================================================================== */
 #include "ai_engine.h"
 
@@ -9,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 
@@ -107,20 +107,45 @@ bool AIEngine::load_model_async(const std::string& model_path, uint32_t requeste
     m_is_loading_model.store(true);
     clear_error();
 
-    uint32_t safe_ctx = std::clamp(requested_ctx, 512u, 131072u);
+    uint32_t safe_ctx = (requested_ctx == 0) ? 0u : std::clamp(requested_ctx, 512u, 131072u);
 
     m_model_load_thread = std::thread([this, model_path, safe_ctx]() {
-        infer_memory_clear(m_ctx);
+        (void)infer_memory_clear(m_ctx);
+
+        std::error_code ec_size;
+        uint64_t fsize = fs::file_size(model_path, ec_size);
+        m_model_size_bytes.store(fsize, std::memory_order_relaxed);
 
         infer_model_params mparams = infer_model_default_params();
         mparams.struct_size = sizeof(infer_model_params);
         mparams.requested_ctx = safe_ctx;
-        mparams.n_gpu_layers = 999; // Offload all layers to GPU
+        mparams.n_gpu_layers = 999;
         mparams.use_mmap = true;
         mparams.flash_attn = true;
+
+        mparams.kv_type_k = INFER_KV_TYPE_Q4_0;
+        mparams.kv_type_v = INFER_KV_TYPE_Q4_0;
         mparams.allow_ctx_reduction = true;
 
         bool success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
+        bool used_gpu = true;
+
+        if (!success) {
+            // Fallback for CPU / Low-VRAM
+            mparams.kv_type_k = INFER_KV_TYPE_Q4_0;
+            mparams.kv_type_v = INFER_KV_TYPE_Q4_0;
+            mparams.requested_ctx = 2048;
+            mparams.n_gpu_layers = 0; // CPU fallback
+            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
+            used_gpu = false;
+        }
+
+        if (success && mparams.n_gpu_layers == 0) {
+            used_gpu = false;
+        }
+
+        m_is_using_gpu.store(used_gpu, std::memory_order_relaxed);
+
         if (!success) {
             char err_buf[512] = { 0 };
             infer_get_last_error(m_ctx, err_buf, sizeof(err_buf));
@@ -128,7 +153,6 @@ bool AIEngine::load_model_async(const std::string& model_path, uint32_t requeste
             m_model_loaded.store(false);
         }
         else {
-            // Pure greedy sampler chain: disables top_k/top_p/min_p sorting for max speed
             infer_sampler_params params = infer_sampler_default_params();
             params.struct_size = sizeof(infer_sampler_params);
             params.temperature = 0.0f;
@@ -144,6 +168,11 @@ bool AIEngine::load_model_async(const std::string& model_path, uint32_t requeste
                 m_model_loaded.store(false);
             }
             else {
+                infer_model_info info{};
+                info.struct_size = sizeof(infer_model_info);
+                if (infer_get_model_info(m_ctx, &info) && info.n_ctx_active > 0) {
+                    m_active_ctx.store(info.n_ctx_active, std::memory_order_relaxed);
+                }
                 {
                     std::lock_guard<std::mutex> lock(m_output_mutex);
                     m_model_path = model_path;
@@ -165,7 +194,6 @@ void AIEngine::configure_task_sampler(const AIEngineOptions& opts) {
     params.struct_size = sizeof(infer_sampler_params);
 
     if (!opts.is_retry && !opts.qwen3_deep_think) {
-        // Fast-path: pure greedy decoding (no top_k/top_p/min_p sorting across 128k vocab)
         params.temperature = 0.0f;
         params.top_p = 1.0f;
         params.top_k = 0;
@@ -173,7 +201,6 @@ void AIEngine::configure_task_sampler(const AIEngineOptions& opts) {
         params.repeat_penalty = 1.05f;
     }
     else {
-        // Stochastic sampling only when Retry Mistake or Qwen3 Deep Think is active
         params.temperature = opts.is_retry ? 0.40f : 0.60f;
         params.top_p = 0.90f;
         params.top_k = 30;
@@ -181,7 +208,7 @@ void AIEngine::configure_task_sampler(const AIEngineOptions& opts) {
         params.repeat_penalty = 1.08f;
     }
 
-    infer_set_sampler(m_ctx, &params);
+    (void)infer_set_sampler(m_ctx, &params);
 }
 
 std::vector<std::pair<std::string, std::string>> AIEngine::parse_glossary(const std::string& raw_glossary) {
@@ -489,8 +516,11 @@ bool AIEngine::start_auto_correct_task(
 void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
     configure_task_sampler(opts);
 
-    // 3800 chars matches original high-speed chunking and minimizes prompt overhead
-    std::vector<std::string> chunks = split_into_chunks(input_text, 3800);
+    uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
+    size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 95) / 100, 1500, 14000);
+    int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 8192));
+
+    std::vector<std::string> chunks = split_into_chunks(input_text, auto_chunk_chars);
     auto glossary = parse_glossary(opts.glossary_raw);
 
     {
@@ -504,9 +534,7 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
     std::string prev_assistant_tail;
     std::string loaded_model = get_loaded_model_path();
 
-    // Clear KV cache ONCE before the loop so infer_core.cpp's active_kv_tokens prefix matcher
-    // automatically reuses the system prompt KV cache across chunks!
-    infer_memory_clear(m_ctx);
+    (void)infer_memory_clear(m_ctx);
 
     for (size_t i = 0; i < chunks.size(); ++i) {
         if (!m_is_task_running.load()) break;
@@ -573,21 +601,19 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
         msg_count++;
 
         int32_t effective_max_tokens = (m_is_qwen3.load() && opts.qwen3_deep_think)
-            ? std::max(opts.max_tokens, 4096)
-            : opts.max_tokens;
+            ? std::max(auto_max_tokens, 4096)
+            : auto_max_tokens;
 
-        bool dispatched = infer_generate_chat_async_v2(
+        bool dispatched = infer_generate_chat_v2(
             m_ctx, msgs, msg_count, effective_max_tokens, AIEngine::stream_callback_v2, this
         );
 
         if (!dispatched) {
             char err_buf[512] = { 0 };
             infer_get_last_error(m_ctx, err_buf, sizeof(err_buf));
-            set_error(std::string("Failed to dispatch async chat task: ") + err_buf);
+            set_error(std::string("Failed to dispatch chat task: ") + err_buf);
             break;
         }
-
-        infer_wait(m_ctx);
 
         std::string completed_chunk;
         {
@@ -609,7 +635,7 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
         }
     }
 
-    infer_memory_clear(m_ctx);
+    (void)infer_memory_clear(m_ctx);
     m_is_task_running.store(false);
 }
 
@@ -655,30 +681,76 @@ bool AIEngine::is_qwen3_loaded() const {
     return m_is_qwen3.load();
 }
 
+bool AIEngine::is_using_gpu() const {
+    return m_is_using_gpu.load(std::memory_order_relaxed);
+}
+
+std::string AIEngine::get_memory_info() const {
+    uint64_t bytes = m_model_size_bytes.load(std::memory_order_relaxed);
+    uint32_t ctx = m_active_ctx.load(std::memory_order_relaxed);
+
+    double model_gb = static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+    double kv_mb = static_cast<double>(ctx) * 0.035;
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2);
+    if (bytes >= 1024 * 1024 * 1024) {
+        oss << "Model VRAM/RAM: " << model_gb << " GB";
+    }
+    else if (bytes > 0) {
+        oss << "Model VRAM/RAM: " << (bytes / (1024.0 * 1024.0)) << " MB";
+    }
+    else {
+        oss << "Model VRAM/RAM: Active";
+    }
+    oss << " | Context Cache: " << ctx << " tokens (~" << static_cast<int>(kv_mb) << " MB)";
+    return oss.str();
+}
+
+std::string AIEngine::get_hardware_info() const {
+    if (m_is_using_gpu.load(std::memory_order_relaxed)) {
+        return "Backend: GPU Offload Active (Flash Attention Enabled)";
+    }
+    else {
+        return "Backend: CPU Multi-Threading Mode (No GPU Offload)";
+    }
+}
+
 std::string AIEngine::get_loaded_model_path() const {
     std::lock_guard<std::mutex> lock(m_output_mutex);
     return m_model_path;
 }
 
 bool AIEngine::get_output_text_if_dirty(std::string& out_text, uint64_t& inout_rev) {
-    std::lock_guard<std::mutex> lock(m_output_mutex);
-    if (m_output_revision == inout_rev && !m_output_dirty) {
-        return false;
+    std::string raw_copy;
+    bool needs_update = false;
+    bool is_q3 = m_is_qwen3.load(std::memory_order_relaxed);
+
+    {
+        std::lock_guard<std::mutex> lock(m_output_mutex);
+        if (m_output_revision == inout_rev && !m_output_dirty) {
+            return false;
+        }
+
+        if (m_output_dirty) {
+            raw_copy = m_output_buffer;
+            m_output_dirty = false;
+            needs_update = true;
+            inout_rev = m_output_revision;
+        }
     }
 
-    if (m_output_dirty) {
-        if (m_is_qwen3.load() || m_output_buffer.compare(0, 7, "<think>") == 0) {
-            m_sanitized_cache = sanitize_thinking_output(m_output_buffer);
+    if (needs_update) {
+        if (is_q3 || raw_copy.compare(0, 7, "<think>") == 0) {
+            out_text = sanitize_thinking_output(raw_copy);
         }
         else {
-            m_sanitized_cache = m_output_buffer;
+            out_text = std::move(raw_copy);
         }
-        m_output_dirty = false;
+        return true;
     }
 
-    out_text = m_sanitized_cache;
-    inout_rev = m_output_revision;
-    return true;
+    return false;
 }
 
 std::string AIEngine::get_output_text() {

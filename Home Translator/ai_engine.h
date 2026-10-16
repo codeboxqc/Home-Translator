@@ -1,6 +1,5 @@
 /* ========================================================================== */
 /* ai_engine.h                                                                */
-/* High-Speed Pro Engine: Prefix KV Reuse, Greedy Fast-Path & 7 Task Modes    */
 /* ========================================================================== */
 #ifndef AI_ENGINE_H
 #define AI_ENGINE_H
@@ -29,12 +28,12 @@ enum class AITaskMode {
 struct AIEngineOptions {
     AITaskMode mode = AITaskMode::Translate;
     std::string input_lang = "English";
-    std::string output_lang = "French (Français)";
+    std::string output_lang = "French (FranÃ§ais)";
     std::string custom_directive;
     std::string glossary_raw;
     bool auto_correct_typos = true;
     bool layout_formatting = false;
-    bool enable_continuity = false;    // Off by default for maximumKV prefix speed
+    bool enable_continuity = false;
     bool enable_tm_cache = true;
     bool qwen3_deep_think = false;
     bool preserve_code_keys = false;
@@ -51,7 +50,7 @@ public:
     AIEngine& operator=(const AIEngine&) = delete;
 
     bool init();
-    bool load_model_async(const std::string& model_path, uint32_t requested_ctx = 4096);
+    bool load_model_async(const std::string& model_path, uint32_t requested_ctx = 0);
 
     bool start_task(const std::string& input_text, const AIEngineOptions& opts);
 
@@ -80,6 +79,11 @@ public:
     bool is_loading_model() const;
     bool is_model_loaded() const;
     bool is_qwen3_loaded() const;
+    bool is_using_gpu() const;
+    std::string get_memory_info() const;
+    std::string get_hardware_info() const;
+
+    uint32_t get_active_ctx() const { return m_active_ctx.load(std::memory_order_relaxed); }
     std::string get_loaded_model_path() const;
 
     bool get_output_text_if_dirty(std::string& out_text, uint64_t& inout_rev);
@@ -117,6 +121,10 @@ private:
     std::atomic<bool> m_model_loaded{ false };
     std::atomic<bool> m_is_loading_model{ false };
     std::atomic<bool> m_is_qwen3{ false };
+    std::atomic<uint32_t> m_active_ctx{ 4096 };
+    std::atomic<bool> m_is_using_gpu{ true };
+    std::atomic<uint64_t> m_model_size_bytes{ 0 };
+
     std::thread m_model_load_thread;
     std::string m_model_path;
 

@@ -1,6 +1,5 @@
 /* ========================================================================== */
 /* app_ui.h                                                                   */
-/* Pro UI: Inline Diff Viewer, Glossary Drawer, 7 AI Modes & SRT/DOCX Export  */
 /* ========================================================================== */
 #ifndef APP_UI_H
 #define APP_UI_H
@@ -38,6 +37,7 @@ private:
 
     void render_donation_button();
     void render_download_modal();
+    void render_startup_gpu_dialog();
     void render_header_panel();
     void render_controls_panel();
     void render_glossary_drawer();
@@ -66,7 +66,7 @@ private:
     AITaskMode m_last_task_mode = AITaskMode::Translate;
     bool m_auto_correct_on_translate = true;
     bool m_layout_formatting = false;
-    bool m_enable_continuity = false; // Off by default for maximum single-turn KV prefix speed
+    bool m_enable_continuity = false;
     bool m_enable_tm_cache = true;
     bool m_qwen3_deep_think = false;
     bool m_preserve_code_keys = false;
@@ -86,11 +86,13 @@ private:
     double m_last_word_count_time{ 0.0 };
     bool m_was_generating{ false };
 
+    std::vector<const char*> m_active_lang_ptrs;
     int m_in_lang_idx = 0;
     int m_out_lang_idx = 1;
-    int m_input_source_idx = 0; // 0: Window Text, 1: Clipboard, 2: File
-    int m_ctx_size = 4096;      // Fits 6 GB RTX 2060 VRAM cleanly
+    int m_input_source_idx = 0;
+    int m_ctx_size = 0;
 
+    bool m_show_startup_gpu_dialog = true;
     bool m_show_download_modal = false;
     bool m_auto_scroll = true;
     std::string m_status_msg;

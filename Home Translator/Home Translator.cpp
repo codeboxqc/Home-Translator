@@ -345,6 +345,9 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
+    // FIX 1: Disable 60-second automatic memory compaction crash
+    io.ConfigMemoryCompactTimer = -1.0f;
+
     setup_unicode_fonts(io);
     setup_modern_theme();
 
@@ -361,10 +364,12 @@ int main(int argc, char** argv) {
     RegisterHotKey(nullptr, 0x4001, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'T');
 #endif
 
+    // FIX 2: Precise 60 FPS / Eco Idle Throttling
+    constexpr uint64_t TARGET_FRAME_NS = 1000000000ULL / 60ULL; // 60 FPS (~16.6 ms)
+    auto prev_frame_time = std::chrono::steady_clock::now();
+
     bool running = true;
     while (running) {
-        
-
 #if defined(_WIN32)
         MSG win_msg;
         while (PeekMessage(&win_msg, nullptr, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {
@@ -407,6 +412,17 @@ int main(int argc, char** argv) {
 
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
+
+        // Frame throttle to prevent 100% CPU/GPU core pegging & TDR crash
+        auto current_time = std::chrono::steady_clock::now();
+        uint64_t elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current_time - prev_frame_time).count();
+        if (elapsed_ns < TARGET_FRAME_NS) {
+            uint64_t sleep_ms = (TARGET_FRAME_NS - elapsed_ns) / 1000000ULL;
+            if (sleep_ms > 0) {
+                SDL_Delay(static_cast<uint32_t>(sleep_ms));
+            }
+        }
+        prev_frame_time = std::chrono::steady_clock::now();
     }
 
 #if defined(_WIN32)

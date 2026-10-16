@@ -1,6 +1,5 @@
 /* ========================================================================== */
 /* app_ui.cpp                                                                 */
-/* Pro UI Implementation: Inline Diff, Glossary Lock, 7 AI Modes & Export     */
 /* ========================================================================== */
 #include "app_ui.h"
 
@@ -84,7 +83,7 @@ namespace {
         SDL_OpenURL(url.c_str());
     }
 
-    std::vector<std::string> tokenize_words_for_diff(const std::string& text, size_t max_words = 1800) {
+    std::vector<std::string> tokenize_words_for_diff(const std::string& text, size_t max_words = 400) {
         std::vector<std::string> tokens;
         std::istringstream iss(text);
         std::string w;
@@ -110,12 +109,16 @@ AppUI::AppUI(AIEngine* engine) : m_engine(engine) {
     }
     else {
         m_show_download_modal = false;
-        m_status_msg = "All models present. Ready (Press Ctrl+Alt+T anytime for Global Clipboard Translate).";
+        m_status_msg = "All models present. Ready.";
         m_status_is_error = false;
     }
 
     if (!m_available_models.empty()) {
         m_engine->load_model_async(m_available_models[0], static_cast<uint32_t>(m_ctx_size));
+        m_show_startup_gpu_dialog = true;
+    }
+    else {
+        m_show_startup_gpu_dialog = false;
     }
 }
 
@@ -384,6 +387,14 @@ void AppUI::render() {
         m_last_input_size = m_input_text.size();
     }
 
+    if (m_show_startup_gpu_dialog) {
+        render_startup_gpu_dialog();
+        if (m_show_download_modal) {
+            render_download_modal();
+        }
+        return;
+    }
+
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -418,6 +429,140 @@ void AppUI::render() {
     }
 
     ImGui::End();
+}
+
+void AppUI::render_startup_gpu_dialog() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(640, 360), ImGuiCond_Appearing);
+
+    ImGui::OpenPopup("GPU Hardware Loading & Status");
+
+    if (ImGui::BeginPopupModal("GPU Hardware Loading & Status", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+
+        bool is_loading = m_engine->is_loading_model();
+        bool model_loaded = m_engine->is_model_loaded();
+        bool is_gpu = m_engine->is_using_gpu();
+
+        ImGui::TextColored(ImVec4(0.25f, 0.75f, 1.0f, 1.0f), "Hardware Initialization & GPU Loading Check");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (is_loading) {
+            // STATE 1: Model & Hardware loading in progress
+            double t = ImGui::GetTime();
+            float pulse = (static_cast<float>(std::sin(t * 5.0)) + 1.0f) * 0.5f;
+
+            ImGui::TextColored(ImVec4(0.90f, 0.80f, 0.30f, 1.0f), "[ INITIALIZING HARDWARE ACCELERATION... ]");
+            ImGui::Spacing();
+
+            std::string active_model = (!m_available_models.empty() && m_selected_model_idx < static_cast<int>(m_available_models.size()))
+                ? m_available_models[m_selected_model_idx]
+                : "Selected Model";
+
+            ImGui::TextWrapped("Loading model into memory and detecting GPU VRAM capabilities:\n%s", active_model.c_str());
+            ImGui::Spacing();
+
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.20f, 0.60f + 0.30f * pulse, 0.95f, 1.0f));
+            ImGui::ProgressBar(-1.0f * static_cast<float>(t * 0.5), ImVec2(-1.0f, 32.0f), "Allocating VRAM & Context Buffers...");
+            ImGui::PopStyleColor();
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Please wait while VRAM offload layers and context cache are configured...");
+        }
+        else if (model_loaded) {
+            // STATE 2: Loading complete - show GPU (BLUE) or CPU (RED) status
+            if (is_gpu) {
+                // RUNNING ON GPU -> BLUE
+                ImGui::TextColored(ImVec4(0.25f, 0.75f, 1.0f, 1.0f), "[ RUNNING ON GPU - HARDWARE ACCELERATION ACTIVE ]");
+                ImGui::Spacing();
+
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "High Performance Mode: GPU Offloading Active (Flash Attention Enabled).");
+                ImGui::Spacing();
+
+                ImGui::BeginChild("GpuInfoFrame", ImVec2(-1, 100), true);
+                ImGui::TextColored(ImVec4(0.25f, 0.75f, 1.0f, 1.0f), "GPU Memory Usage & Allocation:");
+                ImGui::BulletText("%s", m_engine->get_memory_info().c_str());
+                ImGui::BulletText("%s", m_engine->get_hardware_info().c_str());
+                if (!m_available_models.empty() && m_selected_model_idx < static_cast<int>(m_available_models.size())) {
+                    ImGui::BulletText("Active Model File: %s", m_available_models[m_selected_model_idx].c_str());
+                }
+                ImGui::EndChild();
+            }
+            else {
+                // RUNNING ON CPU -> RED
+                ImGui::TextColored(ImVec4(0.95f, 0.25f, 0.25f, 1.0f), "[ WARNING: RUNNING ON CPU - NO GPU OFFLOAD ]");
+                ImGui::Spacing();
+
+                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "Notice: Model is running on CPU. Inference speed will be SLOW!");
+                ImGui::Spacing();
+
+                ImGui::BeginChild("CpuInfoFrame", ImVec2(-1, 100), true);
+                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "CPU Mode Details:");
+                ImGui::BulletText("%s", m_engine->get_memory_info().c_str());
+                ImGui::BulletText("%s", m_engine->get_hardware_info().c_str());
+                ImGui::TextDisabled("For maximum speed, ensure dedicated GPU drivers (CUDA / Vulkan) are installed.");
+                ImGui::EndChild();
+            }
+        }
+        else {
+            // STATE 3: Model load failed
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "[ MODEL LOADING ERROR ]");
+            ImGui::Spacing();
+            ImGui::TextWrapped("Error: %s", m_engine->get_last_error().c_str());
+            ImGui::TextDisabled("Select another model or download official presets.");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 2 BUTTONS: CANCEL AND CONTINUE
+        float button_width = 160.0f;
+        float avail_w = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX((avail_w - (button_width * 2.0f + 20.0f)) * 0.5f);
+
+        // 1. CANCEL BUTTON
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.20f, 0.20f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.28f, 0.28f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.55f, 0.14f, 0.14f, 1.0f));
+
+        if (ImGui::Button(" Cancel ", ImVec2(button_width, 36.0f))) {
+            m_show_startup_gpu_dialog = false;
+            if (is_loading) {
+                m_engine->abort();
+            }
+            if (count_installed_official_presets() < 3 || m_available_models.empty()) {
+                m_show_download_modal = true;
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 20.0f);
+
+        // 2. CONTINUE BUTTON
+        if (is_loading) {
+            ImGui::BeginDisabled();
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.35f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.70f, 0.45f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.45f, 0.28f, 1.0f));
+
+        if (ImGui::Button(" Continue ", ImVec2(button_width, 36.0f))) {
+            m_show_startup_gpu_dialog = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::PopStyleColor(3);
+
+        if (is_loading) {
+            ImGui::EndDisabled();
+        }
+
+        ImGui::EndPopup();
+    }
 }
 
 void AppUI::render_donation_button() {
@@ -554,6 +699,7 @@ void AppUI::render_download_modal() {
             if (!downloaded_path.empty()) {
                 m_engine->load_model_async(downloaded_path, static_cast<uint32_t>(m_ctx_size));
                 m_show_download_modal = false;
+                m_show_startup_gpu_dialog = true;
                 ImGui::CloseCurrentPopup();
             }
         }
@@ -621,7 +767,7 @@ void AppUI::render_header_panel() {
     bool busy = m_engine->is_loading_model() || m_engine->is_generating();
     if (busy) ImGui::BeginDisabled();
 
-    ImGui::PushItemWidth(340.0f);
+    ImGui::PushItemWidth(320.0f);
     if (m_available_models.empty()) {
         ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.2f, 1.0f), "No .gguf models found!");
     }
@@ -637,6 +783,7 @@ void AppUI::render_header_panel() {
                     m_in_lang_idx = 0;
                     m_out_lang_idx = 1;
                     update_active_languages();
+                    m_show_startup_gpu_dialog = true;
                 }
                 else {
                     m_selected_model_idx = prev_idx;
@@ -647,9 +794,10 @@ void AppUI::render_header_panel() {
     ImGui::PopItemWidth();
 
     ImGui::SameLine();
-    ImGui::PushItemWidth(85.0f);
-    if (ImGui::InputInt("Context", &m_ctx_size, 0)) {
-        m_ctx_size = std::clamp(m_ctx_size, 512, 131072);
+    ImGui::PushItemWidth(75.0f);
+    if (ImGui::InputInt("Ctx (0=Auto)", &m_ctx_size, 0)) {
+        if (m_ctx_size < 0) m_ctx_size = 0;
+        else if (m_ctx_size > 0) m_ctx_size = std::clamp(m_ctx_size, 512, 131072);
     }
     ImGui::PopItemWidth();
 
@@ -658,6 +806,11 @@ void AppUI::render_header_panel() {
     ImGui::SameLine();
     if (ImGui::Button("Models")) {
         m_show_download_modal = true;
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("GPU Status")) {
+        m_show_startup_gpu_dialog = true;
     }
 
     ImGui::SameLine();
@@ -670,7 +823,12 @@ void AppUI::render_header_panel() {
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[LOADING MODEL...]");
     }
     else if (m_engine->is_model_loaded()) {
-        ImGui::TextColored(ImVec4(0.24f, 0.85f, 0.40f, 1.0f), "[Model Ready]");
+        ImGui::TextColored(
+            m_engine->is_using_gpu() ? ImVec4(0.24f, 0.72f, 1.0f, 1.0f) : ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
+            "[%s | %u Ctx]",
+            m_engine->is_using_gpu() ? "GPU Ready" : "CPU Slow",
+            m_engine->get_active_ctx()
+        );
     }
     else {
         ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.2f, 1.0f), "[No Model]");
@@ -878,7 +1036,7 @@ void AppUI::render_controls_panel() {
 
         ImGui::SameLine(0, 6.0f);
 
-        // 8. RETRY MISTAKE (Temperature Boosted + Uses Last Task Mode)
+        // 8. RETRY MISTAKE
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.26f, 0.36f, 1.0f));
         if (ImGui::Button("Retry Mistake", ImVec2(110, 34))) {
             dispatch_ai_task(m_last_task_mode, true);
@@ -1001,13 +1159,22 @@ void AppUI::render_text_editors_panel() {
     }
     else {
         ImGuiInputTextFlags out_flags = ImGuiInputTextFlags_ReadOnly;
-        InputTextMultilineStdString("##OutputText", &m_output_text, ImVec2(-FLT_MIN, -FLT_MIN), out_flags);
+        // Pass exact length + 1 to avoid reading past valid string memory on background stream updates
+        ImGui::InputTextMultiline(
+            "##OutputText",
+            const_cast<char*>(m_output_text.c_str()),
+            m_output_text.size() + 1,
+            ImVec2(-FLT_MIN, -FLT_MIN),
+            out_flags
+        );
         if (m_auto_scroll && m_engine->is_generating()) {
             ImGui::SetScrollHereY(1.0f);
         }
     }
-    ImGui::EndChild();
+    ImGui::EndChild();  
 }
+
+
 
 void AppUI::render_status_bar() {
     ImGui::Separator();
