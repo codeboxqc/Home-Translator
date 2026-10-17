@@ -152,7 +152,11 @@ AppUI::AppUI(AIEngine* engine) : m_engine(engine) {
     }
 }
 
-AppUI::~AppUI() {}
+AppUI::~AppUI() {
+    if (m_file_load_thread.joinable()) {
+        m_file_load_thread.join();
+    }
+}
 
 void AppUI::apply_layout_directive() {
     m_custom_directive =
@@ -325,6 +329,8 @@ void AppUI::rebuild_diff_tokens() {
     const size_t m = b.size();
     if (n == 0 && m == 0) return;
 
+    m_diff_tokens.reserve(n + m);
+
     std::vector<uint16_t> dp((n + 1) * (m + 1), 0);
     auto idx = [m](size_t i, size_t j) { return i * (m + 1) + j; };
 
@@ -366,7 +372,11 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
     m_status_msg = "Loading document... (Please wait)";
     m_status_is_error = false;
 
-    std::thread([this, path]() {
+    if (m_file_load_thread.joinable()) {
+        m_file_load_thread.join();
+    }
+
+    m_file_load_thread = std::thread([this, path]() {
         std::string error, loaded_content;
         std::vector<SubtitleCue> cues;
         bool success = DocParser::load_document(path, loaded_content, error, &cues);
@@ -379,7 +389,7 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
         m_async_loaded_ft = ft;
         m_async_loaded_error = std::move(error);
         m_file_load_pending.store(true);
-        }).detach();
+        });
 }
 
 void AppUI::trigger_hotkey_clipboard_translate() {
@@ -444,32 +454,45 @@ void AppUI::dispatch_ai_task(AITaskMode mode, bool is_retry) {
 void AppUI::render() {
     double now = ImGui::GetTime();
 
+    // FIX: Scoped block for m_file_load_mutex locks and unlocks immediately, removing C26110 & C26117
     if (m_file_load_pending.load()) {
-        std::lock_guard<std::mutex> file_lock(m_file_load_mutex);
+        std::string loaded_content;
+        std::vector<SubtitleCue> loaded_cues;
+        std::string loaded_path;
+        DocParser::FileType loaded_ft = DocParser::FileType::UNKNOWN;
+        std::string loaded_error;
 
-        if (m_async_loaded_error.empty()) {
-            m_input_text = std::move(m_async_loaded_content);
-            m_loaded_srt_cues = std::move(m_async_loaded_cues);
-            snprintf(m_doc_path_buf, sizeof(m_doc_path_buf), "%s", m_async_loaded_path.c_str());
+        {
+            std::lock_guard<std::mutex> file_lock(m_file_load_mutex);
+            loaded_content = std::move(m_async_loaded_content);
+            loaded_cues = std::move(m_async_loaded_cues);
+            loaded_path = std::move(m_async_loaded_path);
+            loaded_ft = m_async_loaded_ft;
+            loaded_error = std::move(m_async_loaded_error);
+            m_file_load_pending.store(false);
+        }
 
-            if (m_async_loaded_ft == DocParser::FileType::SUBTITLE || m_async_loaded_ft == DocParser::FileType::LOCALIZATION) {
+        if (loaded_error.empty()) {
+            m_input_text = std::move(loaded_content);
+            m_loaded_srt_cues = std::move(loaded_cues);
+            snprintf(m_doc_path_buf, sizeof(m_doc_path_buf), "%s", loaded_path.c_str());
+
+            if (loaded_ft == DocParser::FileType::SUBTITLE || loaded_ft == DocParser::FileType::LOCALIZATION) {
                 m_preserve_code_keys = true;
             }
-            if (m_async_loaded_ft == DocParser::FileType::SUBTITLE) {
-                snprintf(m_export_path_buf, sizeof(m_export_path_buf), "%s", (m_async_loaded_path + ".translated.srt").c_str());
+            if (loaded_ft == DocParser::FileType::SUBTITLE) {
+                snprintf(m_export_path_buf, sizeof(m_export_path_buf), "%s", (loaded_path + ".translated.srt").c_str());
             }
 
             m_input_source_idx = 2;
-            m_status_msg = "Loaded file into editor: " + m_async_loaded_path +
+            m_status_msg = "Loaded file into editor: " + loaded_path +
                 (!m_loaded_srt_cues.empty() ? " (" + std::to_string(m_loaded_srt_cues.size()) + " subtitle cues locked)" : "");
             m_status_is_error = false;
         }
         else {
-            m_status_msg = "Document error: " + m_async_loaded_error;
+            m_status_msg = "Document error: " + loaded_error;
             m_status_is_error = true;
         }
-
-        m_file_load_pending.store(false);
     }
 
     bool output_updated = false;
@@ -983,8 +1006,10 @@ void AppUI::render_controls_panel() {
         }
         ImGui::PopStyleColor(1);
     }
+   
     else {
-        if (!m_engine->is_model_loaded() || loading_model) ImGui::BeginDisabled();
+        // 1. OPEN disabled state before the action buttons
+        if (!m_engine->is_model_loaded() || loading_model) ImGui::EndDisabled();
 
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.55f, 0.40f, 1.0f));
         if (ImGui::Button(" TRANSLATE ##ActionTranslateBtn", ImVec2(115, 34))) {
@@ -1059,18 +1084,26 @@ void AppUI::render_controls_panel() {
         }
         ImGui::PopStyleColor(1);
 
-        if (!m_engine->is_model_loaded() || loading_model) ImGui::EndDisabled();
+        // 2. CLOSE disabled state after the action buttons
+        if (!m_engine->is_model_loaded() || loading_model) ImGui::BeginDisabled();
     }
 
     ImGui::SameLine(0, 6.0f);
     if (ImGui::Button("Clear All##EditorsClearAllBtn", ImVec2(80, 34))) {
         m_input_text.clear();
-        if (m_input_text.capacity() > 1048576) m_input_text.shrink_to_fit();
+        m_input_text.shrink_to_fit();
+
         m_engine->clear_output_text();
+
         m_output_text.clear();
-        if (m_output_text.capacity() > 1048576) m_output_text.shrink_to_fit();
+        m_output_text.shrink_to_fit();
+
         m_diff_tokens.clear();
+        m_diff_tokens.shrink_to_fit();
+
         m_loaded_srt_cues.clear();
+        m_loaded_srt_cues.shrink_to_fit();
+
         m_cached_input_words = 0;
         m_cached_input_chars = 0;
         m_cached_output_words = 0;

@@ -595,6 +595,17 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
             return;
         }
 
+        // FIX: RAII guard guarantees temp_dir deletion on exit/abort/error
+        struct TempCleanupGuard {
+            std::string path;
+            ~TempCleanupGuard() {
+                if (!path.empty()) {
+                    std::error_code ec;
+                    fs::remove_all(path, ec);
+                }
+            }
+        } temp_guard{ temp_dir };
+
         {
             std::lock_guard<std::mutex> lock(m_chunk_mutex);
             m_current_chunk = 0;
@@ -715,15 +726,12 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
                 set_error("EPUB repack failed: " + final_repack_err);
             }
         }
-        else {
-            std::error_code ec;
-            fs::remove_all(temp_dir, ec);
-        }
 
         m_is_task_running.store(false);
         return;
     }
 
+    // Standard task execution...
     uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
     size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 95) / 100, 1500, 14000);
     int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 8192));
@@ -874,6 +882,9 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
     m_is_task_running.store(false);
 }
 
+
+
+
 bool AIEngine::stream_callback_v2(const char* piece, size_t len, void* user_data) {
     if (!piece || len == 0 || !user_data) return true;
     AIEngine* engine = static_cast<AIEngine*>(user_data);
@@ -990,30 +1001,23 @@ std::string AIEngine::get_loaded_model_path() const {
 }
 
 bool AIEngine::get_output_text_if_dirty(std::string& out_text, uint64_t& inout_rev) {
-    std::string raw_copy;
-    bool needs_update = false;
     bool is_q3 = m_is_qwen3.load(std::memory_order_relaxed);
 
-    {
-        std::lock_guard<std::mutex> lock(m_output_mutex);
-        if (m_output_revision == inout_rev && !m_output_dirty) {
-            return false;
-        }
-
-        if (m_output_dirty) {
-            raw_copy = m_output_buffer;
-            m_output_dirty = false;
-            needs_update = true;
-            inout_rev = m_output_revision;
-        }
+    std::lock_guard<std::mutex> lock(m_output_mutex);
+    if (m_output_revision == inout_rev && !m_output_dirty) {
+        return false;
     }
 
-    if (needs_update) {
-        if (is_q3 || raw_copy.find("<think>") != std::string::npos) {
-            out_text = sanitize_thinking_output(raw_copy);
+    if (m_output_dirty) {
+        m_output_dirty = false;
+        inout_rev = m_output_revision;
+
+        // FIX: Avoid creating temporary raw_copy string on heap
+        if (is_q3 || m_output_buffer.find("<think>") != std::string::npos) {
+            out_text = sanitize_thinking_output(m_output_buffer);
         }
         else {
-            out_text = std::move(raw_copy);
+            out_text = m_output_buffer;
         }
         return true;
     }

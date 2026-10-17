@@ -601,8 +601,10 @@ bool EpubProcessor::create_epub_archive(
         add_file_to_zip(entry.path(), rel_path, ZIP_CM_DEFAULT);
     }
 
+    // FIX: If zip_close fails, zip_discard MUST be called to free LibZip memory
     if (zip_close(archive) < 0) {
         out_error = "LibZip failed to write and finalize the EPUB archive.";
+        zip_discard(archive); // Prevents handle and memory leak on write failure
         return false;
     }
 

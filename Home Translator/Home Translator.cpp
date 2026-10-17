@@ -98,7 +98,7 @@ namespace {
         };
 
         static const ImWchar cjk_ranges[] = {
-            0x3000, 0x303F, 0x3040, 0x309F, 0x30A0, 0x30FF, 0x3100, 0x312F, 0x4E00, 0x9FFF, 0
+            0x3000, 0x303F, 0x3040, 0x309F, 0x3100, 0x312F, 0x4E00, 0x9FFF, 0
         };
 
         static const ImWchar other_ranges[] = {
@@ -296,9 +296,6 @@ namespace {
     }
 } // anonymous namespace
 
-
-
-// 1. Define the disable_quickedit function before main()
 #ifdef _WIN32 
 static void disable_quickedit() {
     HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
@@ -312,16 +309,13 @@ static void disable_quickedit() {
 }
 #endif
 
-
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
 
-
 #ifdef _WIN32 
     disable_quickedit();
 #endif
-
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "Fatal Error: SDL_Init failed: %s\n", SDL_GetError());
@@ -367,8 +361,6 @@ int main(int argc, char** argv) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-
-    // FIX 1: Disable 60-second automatic memory compaction crash
     io.ConfigMemoryCompactTimer = -1.0f;
 
     setup_unicode_fonts(io);
@@ -383,11 +375,9 @@ int main(int argc, char** argv) {
     AppUI app_ui(&ai_engine);
 
 #if defined(_WIN32)
-    // Register Global OS Hotkey: Ctrl + Alt + T (ID = 0x4001)
     RegisterHotKey(nullptr, 0x4001, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'T');
 #endif
 
-    // FIX 2: Precise 60 FPS / Eco Idle Throttling
     constexpr uint64_t TARGET_FRAME_NS = 1000000000ULL / 60ULL; // 60 FPS (~16.6 ms)
     auto prev_frame_time = std::chrono::steady_clock::now();
 
@@ -397,6 +387,7 @@ int main(int argc, char** argv) {
         MSG win_msg;
         while (PeekMessage(&win_msg, nullptr, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {
             if (win_msg.wParam == 0x4001) {
+                SDL_RestoreWindow(window); // Un-minimize window if minimized
                 SDL_RaiseWindow(window);
                 app_ui.trigger_hotkey_clipboard_translate();
             }
@@ -419,6 +410,18 @@ int main(int argc, char** argv) {
             }
         }
 
+        // 1. Check window state BEFORE calling ImGui
+        SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+        int display_w = 0, display_h = 0;
+        SDL_GetWindowSizeInPixels(window, &display_w, &display_h);
+
+        // 2. If minimized or 0 size, sleep and skip the frame completely
+        if ((flags & SDL_WINDOW_MINIMIZED) || (flags & SDL_WINDOW_HIDDEN) || display_w <= 0 || display_h <= 0) {
+            SDL_Delay(20);
+            continue;
+        }
+
+        // 3. Start ImGui ONLY when window is visible and valid
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
@@ -427,8 +430,6 @@ int main(int argc, char** argv) {
 
         ImGui::Render();
 
-        int display_w = 0, display_h = 0;
-        SDL_GetWindowSizeInPixels(window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
         glClearColor(0.08f, 0.09f, 0.12f, 1.00f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -436,13 +437,22 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
 
-        // Frame throttle to prevent 100% CPU/GPU core pegging & TDR crash
-        auto current_time = std::chrono::steady_clock::now();
-        uint64_t elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current_time - prev_frame_time).count();
-        if (elapsed_ns < TARGET_FRAME_NS) {
-            uint64_t sleep_ms = (TARGET_FRAME_NS - elapsed_ns) / 1000000ULL;
-            if (sleep_ms > 0) {
-                SDL_Delay(static_cast<uint32_t>(sleep_ms));
+        // 4. Eco Sleep & Framerate Throttling (variables declared here)
+        bool is_focused = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
+        bool is_busy = ai_engine.is_generating() || ai_engine.is_loading_model();
+
+        if (!is_focused) {
+            SDL_Delay(is_busy ? 66 : 100); // Eco background mode when unfocused
+        }
+        else {
+            // Target 60 FPS when focused
+            auto current_time = std::chrono::steady_clock::now();
+            uint64_t elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current_time - prev_frame_time).count();
+            if (elapsed_ns < TARGET_FRAME_NS) {
+                uint64_t sleep_ms = (TARGET_FRAME_NS - elapsed_ns) / 1000000ULL;
+                if (sleep_ms > 0) {
+                    SDL_Delay(static_cast<uint32_t>(sleep_ms));
+                }
             }
         }
         prev_frame_time = std::chrono::steady_clock::now();

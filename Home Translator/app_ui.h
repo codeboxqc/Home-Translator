@@ -37,12 +37,10 @@ private:
     const std::vector<std::string>& get_active_model_supported_languages() const;
     void update_active_languages();
 
-
     void start_epub_format_translation();
     EpubArchiveState m_epub_state;
     bool m_is_headless_epub_task = false;
     std::string m_headless_epub_out_path;
-
 
     void dispatch_ai_task(AITaskMode mode, bool is_retry = false);
     void rebuild_diff_tokens();
@@ -110,6 +108,7 @@ private:
     bool m_status_is_error = false;
 
     // Async doc loading state
+    std::thread m_file_load_thread; // FIX: Declared m_file_load_thread
     std::mutex m_file_load_mutex;
     std::atomic<bool> m_file_load_pending{ false };
     std::string m_async_loaded_content;
