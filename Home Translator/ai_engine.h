@@ -24,7 +24,14 @@ enum class AITaskMode {
     BilingualAlign,
     ExecutiveSummary,
     Transcreate,
-    ExtractGlossary
+    ExtractGlossary,
+    CodeAssistant,
+    Chat
+};
+
+struct ChatMessage {
+    std::string role;    // "user" or "assistant"
+    std::string content;
 };
 
 struct AIEngineOptions {
@@ -33,6 +40,7 @@ struct AIEngineOptions {
     std::string output_lang = "French (Français)";
     std::string custom_directive;
     std::string glossary_raw;
+    std::vector<ChatMessage> chat_history; // Now it knows what ChatMessage is!
     bool auto_correct_typos = true;
     bool layout_formatting = false;
     bool enable_continuity = false;
@@ -42,7 +50,6 @@ struct AIEngineOptions {
     bool is_retry = false;
     int32_t max_tokens = 2048;
 
-    // Continuous EPUB File-by-File Options:
     bool is_epub_task = false;
     std::string epub_input_path;
     std::string epub_output_path;

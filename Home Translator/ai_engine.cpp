@@ -294,6 +294,11 @@ std::string AIEngine::build_system_prompt(
             "fluent, accurate " + opts.output_lang + " translation, separated by a blank line.";
         break;
 
+    case AITaskMode::Chat:
+        prompt = "You are a helpful, knowledgeable, and friendly AI assistant. "
+            "Answer questions accurately, conversationally, and concisely.";
+        break;
+
     case AITaskMode::ExecutiveSummary:
         prompt = "You are an executive analyst. Analyze the provided " + opts.input_lang + " text and produce a structured Executive Summary written in " + opts.output_lang + ". "
             "Include: 1) Core Thesis / Overview, 2) Key Takeaways (bullet points), and 3) Critical Details or Action Items.";
@@ -307,6 +312,13 @@ std::string AIEngine::build_system_prompt(
     case AITaskMode::ExtractGlossary:
         prompt = "You are a terminology extraction specialist. Scan the provided " + opts.input_lang + " text and extract all proper nouns, character names, locations, "
             "and recurring technical terms. Output ONLY a clean glossary list formatted strictly as: Source Term = " + opts.output_lang + " Equivalent (one per line).";
+        break;
+
+    case AITaskMode::CodeAssistant:
+        prompt = "You are an expert C and C++ software engineer and systems architect. "
+            "Write clean, modern (C++20/C23 where appropriate), idiomatic, high-performance, "
+            "and memory-safe code. Include clear inline comments, robust error handling, "
+            "and provide complete compilable implementations.";
         break;
 
     case AITaskMode::Translate:
@@ -339,7 +351,7 @@ std::string AIEngine::build_system_prompt(
         prompt += "\n\nTranslate ONLY the human-readable text into " + opts.output_lang + ". Do NOT add explanations or notes.";
     }
 
-    if (!glossary.empty() && !active_chunk.empty()) {
+    if (opts.mode != AITaskMode::CodeAssistant && opts.mode != AITaskMode::Chat && !glossary.empty() && !active_chunk.empty()) {
         std::string matched_rules;
         for (const auto& kv : glossary) {
             auto it = std::search(
@@ -356,11 +368,29 @@ std::string AIEngine::build_system_prompt(
         }
     }
 
-    prompt += "\n\nOutput ONLY the final translation without introductory remarks, markdown commentary, explanations, or quotes.";
+    // Set instructions depending on task mode
+    if (opts.mode == AITaskMode::CodeAssistant) {
+        prompt += "\n\nFormat your code inside standard markdown code blocks (e.g., ```cpp). "
+            "Provide the complete solution with brief comments explaining key implementation details.";
+    }
+    else if (opts.mode == AITaskMode::Chat) {
+        // Chat mode: Let the AI respond naturally and conversationally!
+    }
+    else {
+        prompt += "\n\nOutput ONLY the final translation without introductory remarks, markdown commentary, explanations, or quotes.";
+    }
 
     if (!opts.custom_directive.empty()) {
         prompt += "\n\nCRITICAL USER DIRECTIVE:\n" + opts.custom_directive +
             "\nYou MUST strictly follow all user directives above.";
+    }
+
+
+    if (opts.mode == AITaskMode::Chat || opts.mode == AITaskMode::CodeAssistant) {
+        // Do NOT force translation-only output
+    }
+    else {
+        prompt += "\n\nOutput ONLY the final translation without introductory remarks, markdown commentary, explanations, or quotes.";
     }
 
     if (m_is_qwen3.load()) {
@@ -585,6 +615,59 @@ bool AIEngine::start_auto_correct_task(
 
 void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
     configure_task_sampler(opts);
+
+
+
+
+    // ==========================================
+   // CHAT MODE: Multi-Turn Conversation
+   // ==========================================
+    if (opts.mode == AITaskMode::Chat) {
+        std::string sys_prompt = build_system_prompt(opts, "", {});
+
+        std::vector<infer_chat_msg> msgs;
+        msgs.reserve(opts.chat_history.size() + 2);
+
+        // 1. System Prompt
+        infer_chat_msg sys_msg;
+        sys_msg.role = "system";
+        sys_msg.content = sys_prompt.c_str();
+        msgs.push_back(sys_msg);
+
+        // 2. All past conversation turns (Memory)
+        for (const auto& msg : opts.chat_history) {
+            infer_chat_msg m;
+            m.role = msg.role.c_str();
+            m.content = msg.content.c_str();
+            msgs.push_back(m);
+        }
+
+        // 3. New question from user
+        infer_chat_msg user_msg;
+        user_msg.role = "user";
+        user_msg.content = input_text.c_str();
+        msgs.push_back(user_msg);
+
+        int32_t effective_max_tokens = (m_is_qwen3.load() && opts.qwen3_deep_think) ? 4096 : 2048;
+
+        {
+            std::lock_guard<std::mutex> lock(m_output_mutex);
+            m_current_chunk_buffer.clear();
+        }
+
+        bool dispatched = infer_generate_chat_v2(
+            m_ctx, msgs.data(), msgs.size(), effective_max_tokens, AIEngine::stream_callback_v2, this
+        );
+
+        if (!dispatched) {
+            char err_buf[512] = { 0 };
+            infer_get_last_error(m_ctx, err_buf, sizeof(err_buf));
+            set_error(std::string("Failed to dispatch chat: ") + err_buf);
+        }
+
+        m_is_task_running.store(false);
+        return; // Done! Skip all translation logic below
+    }
 
     if (opts.is_epub_task) {
         std::string temp_dir, epub_err;

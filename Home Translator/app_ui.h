@@ -22,6 +22,8 @@ struct DiffToken {
     std::string text;
 };
 
+ 
+
 class AppUI {
 public:
     explicit AppUI(AIEngine* engine);
@@ -41,6 +43,9 @@ private:
     EpubArchiveState m_epub_state;
     bool m_is_headless_epub_task = false;
     std::string m_headless_epub_out_path;
+
+    std::vector<ChatMessage> m_chat_history;
+    std::string m_last_chat_input;
 
     void dispatch_ai_task(AITaskMode mode, bool is_retry = false);
     void rebuild_diff_tokens();

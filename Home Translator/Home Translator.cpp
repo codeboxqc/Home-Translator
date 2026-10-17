@@ -442,16 +442,15 @@ int main(int argc, char** argv) {
         bool is_busy = ai_engine.is_generating() || ai_engine.is_loading_model();
 
         if (!is_focused) {
-            SDL_Delay(is_busy ? 66 : 100); // Eco background mode when unfocused
+            SDL_Delay(is_busy ? 66 : 100);
         }
         else {
-            // Target 60 FPS when focused
             auto current_time = std::chrono::steady_clock::now();
-            uint64_t elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current_time - prev_frame_time).count();
-            if (elapsed_ns < TARGET_FRAME_NS) {
-                uint64_t sleep_ms = (TARGET_FRAME_NS - elapsed_ns) / 1000000ULL;
-                if (sleep_ms > 0) {
-                    SDL_Delay(static_cast<uint32_t>(sleep_ms));
+            int64_t elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current_time - prev_frame_time).count();
+            if (elapsed_ns > 0 && elapsed_ns < static_cast<int64_t>(TARGET_FRAME_NS)) {
+                uint32_t sleep_ms = static_cast<uint32_t>((static_cast<int64_t>(TARGET_FRAME_NS) - elapsed_ns) / 1000000LL);
+                if (sleep_ms > 0 && sleep_ms <= 16) {
+                    SDL_Delay(sleep_ms);
                 }
             }
         }

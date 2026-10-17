@@ -435,6 +435,7 @@ void AppUI::dispatch_ai_task(AITaskMode mode, bool is_retry) {
     opts.qwen3_deep_think = m_qwen3_deep_think;
     opts.preserve_code_keys = m_preserve_code_keys;
     opts.is_retry = is_retry;
+    opts.chat_history = m_chat_history;
 
     m_last_task_mode = mode;
 
@@ -523,8 +524,19 @@ void AppUI::render() {
             m_last_word_count_time = now;
         }
     }
+
     else if (!m_engine->is_generating() && m_was_generating) {
-        if (m_is_headless_epub_task) {
+        if (m_last_task_mode == AITaskMode::Chat) {
+            // Store both user question and AI answer in memory!
+            m_chat_history.push_back({ "user", m_last_chat_input });
+            m_chat_history.push_back({ "assistant", m_output_text });
+
+            m_cached_output_words = count_words(m_output_text);
+            m_cached_output_chars = m_output_text.size();
+            m_status_msg = "AI replied. Ready for next message.";
+            m_status_is_error = false;
+        }
+        else if (m_is_headless_epub_task) {
             std::string err_str = m_engine->get_last_error();
             if (err_str.empty()) {
                 m_status_msg = "Successfully created converted EPUB: " + m_headless_epub_out_path;
@@ -1007,9 +1019,12 @@ void AppUI::render_controls_panel() {
         ImGui::PopStyleColor(1);
     }
    
+     
+
     else {
-        // 1. OPEN disabled state before the action buttons
-        if (!m_engine->is_model_loaded() || loading_model) ImGui::EndDisabled();
+        // Disable action buttons while model is loading or not loaded
+        bool disable_actions = !m_engine->is_model_loaded() || loading_model;
+        if (disable_actions) ImGui::BeginDisabled();
 
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.55f, 0.40f, 1.0f));
         if (ImGui::Button(" TRANSLATE ##ActionTranslateBtn", ImVec2(115, 34))) {
@@ -1022,6 +1037,27 @@ void AppUI::render_controls_panel() {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.48f, 0.82f, 1.0f));
         if (ImGui::Button(" FIX TYPOS ##ActionFixTyposBtn", ImVec2(105, 34))) {
             dispatch_ai_task(AITaskMode::AutoCorrect, false);
+        }
+        ImGui::PopStyleColor(1);
+
+        ImGui::SameLine(0, 6.0f);
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.60f, 0.35f, 1.0f));
+        if (ImGui::Button(" CHAT ##ActionChatBtn", ImVec2(90, 34))) {
+            if (!m_input_text.empty()) {
+                m_last_chat_input = m_input_text;
+                dispatch_ai_task(AITaskMode::Chat, false);
+                m_input_text.clear();
+            }
+        }
+        ImGui::PopStyleColor(1);
+
+        ImGui::SameLine(0, 6.0f);
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.45f, 0.65f, 1.0f));
+        if (ImGui::Button(" CODE ##ActionCodeBtn", ImVec2(115, 34))) {
+            snprintf(m_export_path_buf, sizeof(m_export_path_buf), "solution.cpp");
+            dispatch_ai_task(AITaskMode::CodeAssistant, false);
         }
         ImGui::PopStyleColor(1);
 
@@ -1084,12 +1120,15 @@ void AppUI::render_controls_panel() {
         }
         ImGui::PopStyleColor(1);
 
-        // 2. CLOSE disabled state after the action buttons
-        if (!m_engine->is_model_loaded() || loading_model) ImGui::BeginDisabled();
+        // Re-enable UI
+        if (disable_actions) ImGui::EndDisabled();
     }
 
     ImGui::SameLine(0, 6.0f);
+
     if (ImGui::Button("Clear All##EditorsClearAllBtn", ImVec2(80, 34))) {
+        m_chat_history.clear();
+        m_last_chat_input.clear();
         m_input_text.clear();
         m_input_text.shrink_to_fit();
 
