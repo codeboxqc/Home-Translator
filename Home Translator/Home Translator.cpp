@@ -5,20 +5,21 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define SDL_MAIN_HANDLED
 
-
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <vector>
 #include <stdint.h>
+#include <chrono>
+#include <atomic>
 
 namespace fs = std::filesystem;
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
-#include <sal.h> 
+#include <sal.h>
 #include <windows.h>
 #if defined(_MSC_VER)
 
@@ -45,6 +46,46 @@ namespace fs = std::filesystem;
 #include "doc_parser.h"
 #include "ai_engine.h"
 #include "app_ui.h"
+
+// Atomic guard preventing ImGui re-entrancy crash/freeze when screen recorders attach
+static std::atomic<bool> g_is_in_frame_render{ false };
+
+struct AppContext {
+    SDL_Window* window;
+    AIEngine* engine;
+    AppUI* ui;
+};
+
+static bool SDLCALL render_event_watch(void* userdata, SDL_Event* event) {
+    if (event->type == SDL_EVENT_WINDOW_EXPOSED || event->type == SDL_EVENT_WINDOW_MOVED) {
+        // Skip if main loop or another event watch is already inside ImGui frame
+        if (g_is_in_frame_render.exchange(true)) {
+            return true;
+        }
+
+        AppContext* ctx = static_cast<AppContext*>(userdata);
+        if (ctx && ctx->window && ctx->ui) {
+            int display_w = 0, display_h = 0;
+            SDL_GetWindowSizeInPixels(ctx->window, &display_w, &display_h);
+            if (display_w > 0 && display_h > 0) {
+                ImGui_ImplOpenGL3_NewFrame();
+                ImGui_ImplSDL3_NewFrame();
+                ImGui::NewFrame();
+
+                ctx->ui->render();
+
+                ImGui::Render();
+                glViewport(0, 0, display_w, display_h);
+                glClearColor(0.08f, 0.09f, 0.12f, 1.00f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+                SDL_GL_SwapWindow(ctx->window);
+            }
+        }
+        g_is_in_frame_render.store(false);
+    }
+    return true;
+}
 
 namespace {
     bool try_load_font(
@@ -321,7 +362,7 @@ int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
 
-    SDL_SetMainReady(); // <--- Informs SDL3 that main is handled
+    SDL_SetMainReady();
 
 #ifdef _WIN32 
     disable_quickedit();
@@ -385,6 +426,9 @@ int main(int argc, char** argv) {
     AppUI app_ui(&ai_engine);
     app_ui.set_sdl_window(window);
 
+    AppContext app_ctx{ window, &ai_engine, &app_ui };
+    SDL_AddEventWatch(render_event_watch, &app_ctx);
+
 #if defined(_WIN32)
     RegisterHotKey(nullptr, 0x4001, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'T');
 #endif
@@ -398,7 +442,7 @@ int main(int argc, char** argv) {
         MSG win_msg;
         while (PeekMessage(&win_msg, nullptr, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {
             if (win_msg.wParam == 0x4001) {
-                SDL_RestoreWindow(window); // Un-minimize window if minimized
+                SDL_RestoreWindow(window);
                 SDL_RaiseWindow(window);
                 app_ui.trigger_hotkey_clipboard_translate();
             }
@@ -421,41 +465,44 @@ int main(int argc, char** argv) {
             }
         }
 
-        // 1. Check window state BEFORE calling ImGui
         SDL_WindowFlags flags = SDL_GetWindowFlags(window);
         int display_w = 0, display_h = 0;
         SDL_GetWindowSizeInPixels(window, &display_w, &display_h);
 
-        // 2. If minimized or 0 size, sleep and skip the frame completely
         if ((flags & SDL_WINDOW_MINIMIZED) || (flags & SDL_WINDOW_HIDDEN) || display_w <= 0 || display_h <= 0) {
             SDL_Delay(20);
             continue;
         }
 
-        // 3. Start ImGui ONLY when window is visible and valid
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplSDL3_NewFrame();
-        ImGui::NewFrame();
+        // Render main frame protected against re-entrancy
+        if (!g_is_in_frame_render.exchange(true)) {
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplSDL3_NewFrame();
+            ImGui::NewFrame();
 
-        app_ui.render();
+            app_ui.render();
 
-        ImGui::Render();
+            ImGui::Render();
 
-        glViewport(0, 0, display_w, display_h);
-        glClearColor(0.08f, 0.09f, 0.12f, 1.00f);
-        glClear(GL_COLOR_BUFFER_BIT);
+            glViewport(0, 0, display_w, display_h);
+            glClearColor(0.08f, 0.09f, 0.12f, 1.00f);
+            glClear(GL_COLOR_BUFFER_BIT);
 
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        SDL_GL_SwapWindow(window);
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            SDL_GL_SwapWindow(window);
 
-        // 4. Eco Sleep & Framerate Throttling (variables declared here)
+            g_is_in_frame_render.store(false);
+        }
+
         bool is_focused = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
         bool is_busy = ai_engine.is_generating() || ai_engine.is_loading_model();
 
         if (!is_focused) {
-            SDL_Delay(is_busy ? 66 : 100);
+            SDL_GL_SetSwapInterval(0); // Prevent Windows DWM VSync deadlock when idle/unfocused!
+            SDL_Delay(33);             // 30 FPS keeps region capture tools & overlays responsive
         }
         else {
+            SDL_GL_SetSwapInterval(1); // Enable VSync when focused and active
             auto current_time = std::chrono::steady_clock::now();
             int64_t elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current_time - prev_frame_time).count();
             if (elapsed_ns > 0 && elapsed_ns < static_cast<int64_t>(TARGET_FRAME_NS)) {
@@ -467,6 +514,8 @@ int main(int argc, char** argv) {
         }
         prev_frame_time = std::chrono::steady_clock::now();
     }
+
+    SDL_RemoveEventWatch(render_event_watch, &app_ctx);
 
 #if defined(_WIN32)
     UnregisterHotKey(nullptr, 0x4001);
