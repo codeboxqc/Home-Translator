@@ -1,3 +1,4 @@
+
 /* ========================================================================== */
 /* ai_engine.h                                                                */
 /* ========================================================================== */
@@ -5,6 +6,7 @@
 #define AI_ENGINE_H
 
 #include "infer.h"
+#include "epub.h"
 
 #include <atomic>
 #include <cstdint>
@@ -39,6 +41,11 @@ struct AIEngineOptions {
     bool preserve_code_keys = false;
     bool is_retry = false;
     int32_t max_tokens = 2048;
+
+    // Continuous EPUB File-by-File Options:
+    bool is_epub_task = false;
+    std::string epub_input_path;
+    std::string epub_output_path;
 };
 
 class AIEngine {

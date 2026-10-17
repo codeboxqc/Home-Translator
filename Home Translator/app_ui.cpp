@@ -2,6 +2,15 @@
 /* app_ui.cpp                                                                 */
 /* Clean, Popup-Free, 100% Responsive UI Layout                               */
 /* ========================================================================== */
+#include <cstddef>
+#include <cstdint>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cwchar>
+#include <ctime>
+
 #include "app_ui.h"
 
 #include <SDL3/SDL.h>
@@ -9,13 +18,38 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <sstream>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <commdlg.h>
+#pragma comment(lib, "comdlg32.lib")
+#endif
+
 namespace fs = std::filesystem;
+
+std::string open_file_dialog_epub() {
+#if defined(_WIN32)
+    char filename[MAX_PATH] = { 0 };
+    OPENFILENAMEA ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = nullptr;
+    ofn.lpstrFilter = "EPUB Books (*.epub)\0*.epub\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = "epub";
+
+    if (GetOpenFileNameA(&ofn)) {
+        return std::string(filename);
+    }
+#endif
+    return "";
+}
 
 namespace {
     struct InputTextCallback_UserData {
@@ -109,7 +143,6 @@ AppUI::AppUI(AIEngine* engine) : m_engine(engine) {
         m_status_is_error = false;
     }
     else {
-        // Start loading the first available model silently in the background
         m_engine->load_model_async(m_available_models[0], static_cast<uint32_t>(m_ctx_size));
         m_show_download_window = false;
         m_status_msg = (installed_presets < 3)
@@ -128,6 +161,58 @@ void AppUI::apply_layout_directive() {
         "2. Ensure proper sentence-start capitalization.\n"
         "3. Standardize punctuation (periods, commas, em-dashes for dialogs).\n"
         "4. Preserve original story, meaning, and voice 100% faithfully.";
+}
+
+void AppUI::start_epub_format_translation() {
+    std::string in_path = open_file_dialog_epub();
+    if (in_path.empty()) {
+        return;
+    }
+
+    std::string out_path = in_path;
+    if (out_path.size() > 5 && out_path.substr(out_path.size() - 5) == ".epub") {
+        out_path = out_path.substr(0, out_path.size() - 5) + "-convert.epub";
+    }
+    else {
+        out_path += "-convert.epub";
+    }
+    m_headless_epub_out_path = out_path;
+
+    m_is_headless_epub_task = true;
+    m_cached_output_words = 0;
+    m_cached_output_chars = 0;
+    m_output_revision = 0;
+
+    const auto& active_langs = get_active_model_supported_languages();
+    AIEngineOptions opts;
+    opts.mode = AITaskMode::Translate;
+    opts.input_lang = active_langs[m_in_lang_idx];
+    opts.output_lang = active_langs[m_out_lang_idx];
+    opts.custom_directive = m_custom_directive;
+    opts.glossary_raw = m_glossary_text;
+    opts.auto_correct_typos = m_auto_correct_on_translate;
+    opts.layout_formatting = false;
+    opts.enable_continuity = m_enable_continuity;
+    opts.enable_tm_cache = m_enable_tm_cache;
+    opts.qwen3_deep_think = m_qwen3_deep_think;
+    opts.preserve_code_keys = true;
+    opts.is_retry = false;
+
+    opts.is_epub_task = true;
+    opts.epub_input_path = in_path;
+    opts.epub_output_path = out_path;
+
+    m_engine->clear_output_text();
+
+    if (m_engine->start_task("EPUB_TASK", opts)) {
+        m_status_msg = "EPUB Continuous File-by-File Converter Running: " + fs::path(in_path).filename().string() + "...";
+        m_status_is_error = false;
+    }
+    else {
+        m_status_msg = m_engine->get_last_error();
+        m_status_is_error = true;
+        m_is_headless_epub_task = false;
+    }
 }
 
 void AppUI::scan_available_models() {
@@ -287,7 +372,7 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
         bool success = DocParser::load_document(path, loaded_content, error, &cues);
         DocParser::FileType ft = DocParser::detect_file_type(path);
 
-        std::lock_guard<std::mutex> lock(m_file_load_mutex);
+        std::lock_guard<std::mutex> file_lock(m_file_load_mutex);
         m_async_loaded_content = std::move(loaded_content);
         m_async_loaded_cues = std::move(cues);
         m_async_loaded_path = path;
@@ -343,7 +428,6 @@ void AppUI::dispatch_ai_task(AITaskMode mode, bool is_retry) {
 
     m_last_task_mode = mode;
 
-    // Clear the output string here so that delta updates don't keep appending to previous session
     m_output_text.clear();
     m_output_revision = 0;
 
@@ -361,7 +445,7 @@ void AppUI::render() {
     double now = ImGui::GetTime();
 
     if (m_file_load_pending.load()) {
-        std::lock_guard<std::mutex> lock(m_file_load_mutex);
+        std::lock_guard<std::mutex> file_lock(m_file_load_mutex);
 
         if (m_async_loaded_error.empty()) {
             m_input_text = std::move(m_async_loaded_content);
@@ -388,7 +472,26 @@ void AppUI::render() {
         m_file_load_pending.store(false);
     }
 
-    bool output_updated = m_engine->get_output_text_if_dirty(m_output_text, m_output_revision);
+    bool output_updated = false;
+
+    if (m_is_headless_epub_task) {
+        std::string headless_stream_snapshot;
+        if (m_engine->get_output_text_if_dirty(headless_stream_snapshot, m_output_revision)) {
+            m_cached_output_chars = headless_stream_snapshot.size();
+            m_cached_output_words = m_cached_output_chars / 6;
+
+            size_t cur_c = 0, tot_c = 0, tm_h = 0;
+            float pct = 0.0f;
+            m_engine->get_chunk_progress(cur_c, tot_c, pct, tm_h);
+            m_status_msg = "EPUB Continuous File Converter: File " + std::to_string(cur_c) + " / " + std::to_string(tot_c) +
+                " (" + std::to_string(static_cast<int>(pct * 100.0f)) + "%) | " +
+                std::to_string(m_cached_output_words) + " words converted...";
+            m_status_is_error = false;
+        }
+    }
+    else {
+        output_updated = m_engine->get_output_text_if_dirty(m_output_text, m_output_revision);
+    }
 
     if (output_updated) {
         m_cached_output_chars = m_output_text.size();
@@ -398,12 +501,27 @@ void AppUI::render() {
         }
     }
     else if (!m_engine->is_generating() && m_was_generating) {
-        m_cached_output_words = count_words(m_output_text);
-        m_cached_output_chars = m_output_text.size();
-        if (m_show_inline_diff) rebuild_diff_tokens();
-        m_status_msg = "Completed successfully. (" + std::to_string(m_cached_output_words) + " words generated)";
-        m_status_is_error = false;
+        if (m_is_headless_epub_task) {
+            std::string err_str = m_engine->get_last_error();
+            if (err_str.empty()) {
+                m_status_msg = "Successfully created converted EPUB: " + m_headless_epub_out_path;
+                m_status_is_error = false;
+            }
+            else {
+                m_status_msg = "EPUB Conversion Error: " + err_str;
+                m_status_is_error = true;
+            }
+            m_is_headless_epub_task = false;
+        }
+        else {
+            m_cached_output_words = count_words(m_output_text);
+            m_cached_output_chars = m_output_text.size();
+            if (m_show_inline_diff) rebuild_diff_tokens();
+            m_status_msg = "Completed successfully. (" + std::to_string(m_cached_output_words) + " words generated)";
+            m_status_is_error = false;
+        }
     }
+
     m_was_generating = m_engine->is_generating();
 
     if (m_input_text.size() != m_last_input_size) {
@@ -443,7 +561,6 @@ void AppUI::render() {
 
     ImGui::End();
 
-    // RENDER NON-BLOCKING DOWNLOAD WINDOW IF REQUESTED
     if (m_show_download_window) {
         render_download_window();
     }
@@ -480,14 +597,30 @@ void AppUI::render_progress_and_cancel_bar() {
     float chunk_pct = 0.0f;
     m_engine->get_chunk_progress(cur_chunk, tot_chunks, chunk_pct, tm_hits);
 
-    char progress_str[160];
-    if (tot_chunks > 1) {
-        snprintf(progress_str, sizeof(progress_str), "Chunk %zu/%zu (%.1f%%) | TM Cache Hits: %zu | %zu words",
-            cur_chunk, tot_chunks, chunk_pct * 100.0f, tm_hits, m_cached_output_words);
+    char progress_str[200];
+    if (m_is_headless_epub_task) {
+        snprintf(
+            progress_str,
+            sizeof(progress_str),
+            "EPUB Continuous Converter: File %zu / %zu (%.1f%%) | %zu words converted",
+            cur_chunk, tot_chunks, chunk_pct * 100.0f, m_cached_output_words
+        );
+    }
+    else if (tot_chunks > 1) {
+        snprintf(
+            progress_str,
+            sizeof(progress_str),
+            "Chunk %zu/%zu (%.1f%%) | TM Cache Hits: %zu | %zu words (%zu chars)",
+            cur_chunk, tot_chunks, chunk_pct * 100.0f, tm_hits, m_cached_output_words, m_cached_output_chars
+        );
     }
     else {
-        snprintf(progress_str, sizeof(progress_str), "Generating... (%zu words / %zu chars generated)",
-            m_cached_output_words, m_cached_output_chars);
+        snprintf(
+            progress_str,
+            sizeof(progress_str),
+            "Generating... (%zu words / %zu chars generated)",
+            m_cached_output_words, m_cached_output_chars
+        );
     }
 
     float avail_w = ImGui::GetContentRegionAvail().x - 170.0f;
@@ -504,6 +637,10 @@ void AppUI::render_progress_and_cancel_bar() {
 
     if (ImGui::Button(" CANCEL / STOP ##ProgressBarCancel", ImVec2(150, 32))) {
         m_engine->abort();
+        if (m_is_headless_epub_task) {
+            EpubProcessor::cleanup_state(m_epub_state);
+            m_is_headless_epub_task = false;
+        }
         m_status_msg = "Generation cancelled by user.";
         m_status_is_error = true;
     }
@@ -652,7 +789,6 @@ void AppUI::render_header_panel() {
         int prev_idx = m_selected_model_idx;
         if (ImGui::Combo("Active Model##HeaderModelCombo", &m_selected_model_idx, model_ptrs.data(), static_cast<int>(model_ptrs.size()))) {
             if (m_selected_model_idx != prev_idx && !m_available_models.empty()) {
-                // Silently load selected model in the background without opening any blocking popups!
                 if (m_engine->load_model_async(m_available_models[m_selected_model_idx], static_cast<uint32_t>(m_ctx_size))) {
                     m_in_lang_idx = 0;
                     m_out_lang_idx = 1;
@@ -688,7 +824,6 @@ void AppUI::render_header_panel() {
         m_show_glossary_drawer = !m_show_glossary_drawer;
     }
 
-    // INLINE GPU/CPU HARDWARE STATUS - WITH HOVER TOOLTIP (Zero popups, zero freezes!)
     ImGui::SameLine();
     if (m_engine->is_loading_model()) {
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[LOADING MODEL...]");
@@ -775,7 +910,6 @@ void AppUI::render_controls_panel() {
         }
     }
 
-    // DIRECTIVE / INSTRUCTIONS
     ImGui::Spacing();
     float avail_width = ImGui::GetContentRegionAvail().x;
     float buttons_width = 450.0f;
@@ -813,7 +947,6 @@ void AppUI::render_controls_panel() {
         m_custom_directive.clear();
     }
 
-    // PRO ENGINE TOGGLES ROW
     ImGui::Checkbox("Fix Typos##ToggleFixTypos", &m_auto_correct_on_translate);
     ImGui::SameLine(0, 14.0f);
     ImGui::Checkbox("Book Layout##ToggleBookLayout", &m_layout_formatting);
@@ -834,7 +967,6 @@ void AppUI::render_controls_panel() {
 
     ImGui::Spacing();
 
-    // ACTION BUTTONS ROW
     bool generating = m_engine->is_generating();
     bool loading_model = m_engine->is_loading_model();
 
@@ -842,6 +974,10 @@ void AppUI::render_controls_panel() {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.82f, 0.20f, 0.20f, 1.0f));
         if (ImGui::Button(" STOP / CANCEL ##ControlsStopCancelBtn", ImVec2(150, 34))) {
             m_engine->abort();
+            if (m_is_headless_epub_task) {
+                EpubProcessor::cleanup_state(m_epub_state);
+                m_is_headless_epub_task = false;
+            }
             m_status_msg = "Abort requested.";
             m_status_is_error = true;
         }
@@ -850,7 +986,6 @@ void AppUI::render_controls_panel() {
     else {
         if (!m_engine->is_model_loaded() || loading_model) ImGui::BeginDisabled();
 
-        // 1. TRANSLATE
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.55f, 0.40f, 1.0f));
         if (ImGui::Button(" TRANSLATE ##ActionTranslateBtn", ImVec2(115, 34))) {
             dispatch_ai_task(AITaskMode::Translate, false);
@@ -859,7 +994,6 @@ void AppUI::render_controls_panel() {
 
         ImGui::SameLine(0, 6.0f);
 
-        // 2. AUTO-CORRECT TYPOS
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.48f, 0.82f, 1.0f));
         if (ImGui::Button(" FIX TYPOS ##ActionFixTyposBtn", ImVec2(105, 34))) {
             dispatch_ai_task(AITaskMode::AutoCorrect, false);
@@ -868,7 +1002,6 @@ void AppUI::render_controls_panel() {
 
         ImGui::SameLine(0, 6.0f);
 
-        // 3. FORMAT LAYOUT
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.44f, 0.24f, 0.72f, 1.0f));
         if (ImGui::Button(" LAYOUT ##ActionLayoutBtn", ImVec2(85, 34))) {
             apply_layout_directive();
@@ -879,7 +1012,6 @@ void AppUI::render_controls_panel() {
 
         ImGui::SameLine(0, 6.0f);
 
-        // 4. BILINGUAL ALIGN
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.52f, 0.62f, 1.0f));
         if (ImGui::Button(" BILINGUAL ##ActionBilingualBtn", ImVec2(100, 34))) {
             dispatch_ai_task(AITaskMode::BilingualAlign, false);
@@ -888,7 +1020,6 @@ void AppUI::render_controls_panel() {
 
         ImGui::SameLine(0, 6.0f);
 
-        // 5. EXECUTIVE SUMMARY
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.42f, 0.14f, 1.0f));
         if (ImGui::Button(" SUMMARIZE ##ActionSummarizeBtn", ImVec2(105, 34))) {
             dispatch_ai_task(AITaskMode::ExecutiveSummary, false);
@@ -897,7 +1028,6 @@ void AppUI::render_controls_panel() {
 
         ImGui::SameLine(0, 6.0f);
 
-        // 6. TRANSCREATE
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.58f, 0.22f, 0.45f, 1.0f));
         if (ImGui::Button(" TRANSCREATE ##ActionTranscreateBtn", ImVec2(115, 34))) {
             dispatch_ai_task(AITaskMode::Transcreate, false);
@@ -906,7 +1036,6 @@ void AppUI::render_controls_panel() {
 
         ImGui::SameLine(0, 6.0f);
 
-        // 7. EXTRACT GLOSSARY
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.45f, 0.35f, 1.0f));
         if (ImGui::Button(" GLOSSARY AI ##ActionGlossaryBtn", ImVec2(110, 34))) {
             m_show_glossary_drawer = true;
@@ -916,10 +1045,17 @@ void AppUI::render_controls_panel() {
 
         ImGui::SameLine(0, 6.0f);
 
-        // 8. RETRY MISTAKE
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.26f, 0.36f, 1.0f));
         if (ImGui::Button("Retry Mistake##ActionRetryBtn", ImVec2(110, 34))) {
             dispatch_ai_task(m_last_task_mode, true);
+        }
+        ImGui::PopStyleColor(1);
+
+        ImGui::SameLine(0, 6.0f);
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.32f, 0.12f, 1.0f));
+        if (ImGui::Button(" EPUB File ##ActionEpubFormatBtn", ImVec2(125, 34))) {
+            start_epub_format_translation();
         }
         ImGui::PopStyleColor(1);
 
@@ -1019,6 +1155,7 @@ void AppUI::render_text_editors_panel() {
     ImGui::InputText("##ExportPath", m_export_path_buf, sizeof(m_export_path_buf));
     ImGui::PopItemWidth();
     ImGui::SameLine();
+
     if (ImGui::SmallButton("Save/Export##SaveExportFileBtn")) {
         std::string err;
         if (DocParser::save_document(m_export_path_buf, m_output_text, m_loaded_srt_cues, err)) {
@@ -1038,7 +1175,6 @@ void AppUI::render_text_editors_panel() {
         render_inline_diff_view();
     }
     else {
-        // Crash-proof multiline text widget with resize callback
         InputTextMultilineStdString(
             "##OutputText",
             &m_output_text,

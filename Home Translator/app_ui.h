@@ -7,6 +7,7 @@
 
 #include "ai_engine.h"
 #include "doc_parser.h"
+#include "epub.h"
 #include "model_downloader.h"
 
 #include <cstdint>
@@ -35,6 +36,13 @@ private:
     int count_installed_official_presets() const;
     const std::vector<std::string>& get_active_model_supported_languages() const;
     void update_active_languages();
+
+
+    void start_epub_format_translation();
+    EpubArchiveState m_epub_state;
+    bool m_is_headless_epub_task = false;
+    std::string m_headless_epub_out_path;
+
 
     void dispatch_ai_task(AITaskMode mode, bool is_retry = false);
     void rebuild_diff_tokens();

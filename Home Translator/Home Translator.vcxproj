@@ -127,6 +127,7 @@
     <ClInclude Include="ai_engine.h" />
     <ClInclude Include="app_ui.h" />
     <ClInclude Include="doc_parser.h" />
+    <ClInclude Include="epub.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="Home Translator.h" />
     <ClInclude Include="infer.h" />
@@ -138,6 +139,7 @@
     <ClCompile Include="ai_engine.cpp" />
     <ClCompile Include="app_ui.cpp" />
     <ClCompile Include="doc_parser.cpp" />
+    <ClCompile Include="epub.cpp" />
     <ClCompile Include="Home Translator.cpp" />
     <ClCompile Include="model_downloader.cpp" />
   </ItemGroup>
