@@ -453,6 +453,10 @@ void AppUI::dispatch_ai_task(AITaskMode mode, bool is_retry) {
 }
 
 void AppUI::render() {
+
+
+    apply_dynamic_theme();
+
     double now = ImGui::GetTime();
 
     // FIX: Scoped block for m_file_load_mutex locks and unlocks immediately, removing C26110 & C26117
@@ -599,6 +603,7 @@ void AppUI::render() {
     if (m_show_download_window) {
         render_download_window();
     }
+    render_model_loading_overlay();
 }
 
 void AppUI::render_donation_button() {
@@ -868,12 +873,13 @@ void AppUI::render_header_panel() {
     }
     else if (m_engine->is_model_loaded()) {
         bool is_gpu = m_engine->is_using_gpu();
-        ImGui::TextColored(
-            is_gpu ? ImVec4(0.24f, 0.72f, 1.0f, 1.0f) : ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
-            "[%s | %u Ctx]",
-            is_gpu ? "GPU Ready" : "CPU Slow",
-            m_engine->get_active_ctx()
-        );
+        if (is_gpu) {
+            ImGui::TextColored(ImVec4(0.24f, 0.72f, 1.0f, 1.0f), "[GPU Ready | %u Ctx]", m_engine->get_active_ctx());
+        }
+        else {
+            ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f), "[CPU Mode - SLOW PERFORMANCE | %u Ctx]", m_engine->get_active_ctx());
+        }
+
         if (ImGui::IsItemHovered()) {
             std::string tip = m_engine->get_hardware_info() + "\n" + m_engine->get_memory_info() +
                 "\nActive: " + m_engine->get_loaded_model_path();
@@ -1277,4 +1283,97 @@ void AppUI::render_status_bar() {
     else {
         ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "Status: %s", m_status_msg.c_str());
     }
+}
+
+
+
+void AppUI::apply_dynamic_theme() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* colors = style.Colors;
+
+    bool model_loaded = m_engine->is_model_loaded();
+    bool is_cpu = model_loaded && !m_engine->is_using_gpu();
+
+    if (is_cpu) {
+        // --- RED THEME FOR CPU SLOW MODE ---
+        colors[ImGuiCol_WindowBg] = ImVec4(0.14f, 0.05f, 0.05f, 1.00f);
+        colors[ImGuiCol_ChildBg] = ImVec4(0.18f, 0.07f, 0.07f, 0.85f);
+        colors[ImGuiCol_PopupBg] = ImVec4(0.18f, 0.07f, 0.07f, 0.98f);
+        colors[ImGuiCol_Border] = ImVec4(0.65f, 0.18f, 0.18f, 0.70f);
+        colors[ImGuiCol_FrameBg] = ImVec4(0.26f, 0.09f, 0.09f, 0.80f);
+        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.36f, 0.12f, 0.12f, 1.00f);
+        colors[ImGuiCol_FrameBgActive] = ImVec4(0.46f, 0.15f, 0.15f, 1.00f);
+        colors[ImGuiCol_TitleBg] = ImVec4(0.18f, 0.05f, 0.05f, 1.00f);
+        colors[ImGuiCol_TitleBgActive] = ImVec4(0.30f, 0.08f, 0.08f, 1.00f);
+        colors[ImGuiCol_Button] = ImVec4(0.48f, 0.12f, 0.12f, 0.90f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.62f, 0.18f, 0.18f, 1.00f);
+        colors[ImGuiCol_ButtonActive] = ImVec4(0.72f, 0.22f, 0.22f, 1.00f);
+        colors[ImGuiCol_Header] = ImVec4(0.42f, 0.12f, 0.12f, 0.80f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.58f, 0.18f, 0.18f, 0.90f);
+        colors[ImGuiCol_PlotHistogram] = ImVec4(0.92f, 0.22f, 0.22f, 1.00f);
+    }
+    else {
+        // --- NORMAL BLUE DARK THEME FOR GPU MODE ---
+        colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.09f, 0.12f, 1.00f);
+        colors[ImGuiCol_ChildBg] = ImVec4(0.10f, 0.12f, 0.16f, 0.85f);
+        colors[ImGuiCol_PopupBg] = ImVec4(0.10f, 0.12f, 0.16f, 0.98f);
+        colors[ImGuiCol_Border] = ImVec4(0.18f, 0.22f, 0.30f, 0.70f);
+        colors[ImGuiCol_FrameBg] = ImVec4(0.13f, 0.16f, 0.22f, 0.80f);
+        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.23f, 0.32f, 1.00f);
+        colors[ImGuiCol_FrameBgActive] = ImVec4(0.22f, 0.28f, 0.38f, 1.00f);
+        colors[ImGuiCol_TitleBg] = ImVec4(0.08f, 0.09f, 0.12f, 1.00f);
+        colors[ImGuiCol_TitleBgActive] = ImVec4(0.11f, 0.14f, 0.19f, 1.00f);
+        colors[ImGuiCol_Button] = ImVec4(0.15f, 0.20f, 0.28f, 0.90f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.29f, 0.40f, 1.00f);
+        colors[ImGuiCol_ButtonActive] = ImVec4(0.28f, 0.37f, 0.52f, 1.00f);
+        colors[ImGuiCol_Header] = ImVec4(0.15f, 0.21f, 0.30f, 0.80f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.22f, 0.30f, 0.44f, 0.90f);
+        colors[ImGuiCol_PlotHistogram] = ImVec4(0.20f, 0.65f, 0.95f, 1.00f);
+    }
+}
+
+void AppUI::render_model_loading_overlay() {
+    if (!m_engine->is_loading_model()) return;
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(viewport->Size);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoInputs;
+
+    ImGui::Begin("##ModelLoadingWaitOverlay", nullptr, flags);
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    ImVec2 v_min = viewport->Pos;
+    ImVec2 v_max = ImVec2(v_min.x + viewport->Size.x, v_min.y + viewport->Size.y);
+
+    // Dark background dim
+    draw_list->AddRectFilled(v_min, v_max, IM_COL32(5, 7, 10, 220));
+
+    // Centered Spinner
+    ImVec2 center = ImVec2(v_min.x + viewport->Size.x * 0.5f, v_min.y + viewport->Size.y * 0.5f);
+    float t = static_cast<float>(ImGui::GetTime());
+    float radius = 35.0f;
+    int num_segments = 36;
+    float start_angle = t * 7.0f;
+    float end_angle = start_angle + 4.8f;
+
+    draw_list->PathClear();
+    for (int i = 0; i <= num_segments; i++) {
+        float a = start_angle + (static_cast<float>(i) / num_segments) * (end_angle - start_angle);
+        draw_list->PathLineTo(ImVec2(center.x + std::cos(a) * radius, center.y + std::sin(a) * radius));
+    }
+    draw_list->PathStroke(IM_COL32(255, 180, 40, 255), 0, 6.0f);
+
+    // Text Label
+    const char* msg = "Loading AI Model Weights... Please Wait";
+    ImVec2 text_size = ImGui::CalcTextSize(msg);
+    ImGui::SetCursorScreenPos(ImVec2(center.x - text_size.x * 0.5f, center.y + radius + 25.0f));
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", msg);
+
+    ImGui::End();
 }

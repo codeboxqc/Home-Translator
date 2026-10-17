@@ -39,6 +39,10 @@ private:
     const std::vector<std::string>& get_active_model_supported_languages() const;
     void update_active_languages();
 
+    void apply_dynamic_theme();
+    void render_model_loading_overlay();
+
+
     void start_epub_format_translation();
     EpubArchiveState m_epub_state;
     bool m_is_headless_epub_task = false;

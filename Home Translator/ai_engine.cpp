@@ -149,16 +149,16 @@ bool AIEngine::load_model_async(const std::string& model_path, uint32_t requeste
         mparams.use_mmap = true;
         mparams.flash_attn = true;
 
-        mparams.kv_type_k = INFER_KV_TYPE_Q4_0;
-        mparams.kv_type_v = INFER_KV_TYPE_Q4_0;
+        mparams.kv_type_k = INFER_KV_TYPE_F16;
+        mparams.kv_type_v = INFER_KV_TYPE_F16;
         mparams.allow_ctx_reduction = true;
 
         bool success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
         bool used_gpu = true;
 
         if (!success) {
-            mparams.kv_type_k = INFER_KV_TYPE_Q4_0;
-            mparams.kv_type_v = INFER_KV_TYPE_Q4_0;
+            mparams.kv_type_k = INFER_KV_TYPE_F16;
+            mparams.kv_type_v = INFER_KV_TYPE_F16;
             mparams.requested_ctx = 2048;
             mparams.n_gpu_layers = 0;
             success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
@@ -228,7 +228,7 @@ void AIEngine::configure_task_sampler(const AIEngineOptions& opts) {
         params.top_p = 1.0f;
         params.top_k = 0;
         params.min_p = 0.0f;
-        params.repeat_penalty = 1.05f;
+        params.repeat_penalty = 1.12f;
     }
     else {
         params.temperature = opts.is_retry ? 0.40f : 0.60f;
@@ -383,14 +383,6 @@ std::string AIEngine::build_system_prompt(
     if (!opts.custom_directive.empty()) {
         prompt += "\n\nCRITICAL USER DIRECTIVE:\n" + opts.custom_directive +
             "\nYou MUST strictly follow all user directives above.";
-    }
-
-
-    if (opts.mode == AITaskMode::Chat || opts.mode == AITaskMode::CodeAssistant) {
-        // Do NOT force translation-only output
-    }
-    else {
-        prompt += "\n\nOutput ONLY the final translation without introductory remarks, markdown commentary, explanations, or quotes.";
     }
 
     if (m_is_qwen3.load()) {

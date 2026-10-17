@@ -3,6 +3,8 @@
 /* Multi-Script Fonts, Global Hotkey (Ctrl+Alt+T) & Eco Idle Frame Throttling */
 /* ========================================================================== */
 #define _CRT_SECURE_NO_WARNINGS
+#define SDL_MAIN_HANDLED
+
 
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +20,11 @@ namespace fs = std::filesystem;
 #define NOMINMAX
 #include <windows.h>
 #if defined(_MSC_VER)
+
+/////////////////////  hide cmd console
+#pragma comment(linker, "/subsystem:windows /ENTRY:mainCRTStartup")
+//////////////////
+
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "infer.lib")
@@ -312,6 +319,8 @@ static void disable_quickedit() {
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
+
+    SDL_SetMainReady(); // <--- Informs SDL3 that main is handled
 
 #ifdef _WIN32 
     disable_quickedit();
