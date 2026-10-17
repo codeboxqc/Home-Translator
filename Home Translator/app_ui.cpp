@@ -521,15 +521,18 @@ void AppUI::render() {
         output_updated = m_engine->get_output_text_if_dirty(m_output_text, m_output_revision);
     }
 
+    bool is_generating = m_engine->is_generating();
+    bool just_finished = m_was_generating && !is_generating;
+
     if (output_updated) {
         m_cached_output_chars = m_output_text.size();
-        if (!m_engine->is_generating() || (now - m_last_word_count_time > 0.25)) {
+        if (!is_generating || (now - m_last_word_count_time > 0.25)) {
             m_cached_output_words = count_words(m_output_text);
             m_last_word_count_time = now;
         }
     }
 
-    else if (!m_engine->is_generating() && m_was_generating) {
+    if (just_finished) {
         if (m_last_task_mode == AITaskMode::Chat) {
             // Store both user question and AI answer in memory!
             m_chat_history.push_back({ "user", m_last_chat_input });
@@ -561,7 +564,7 @@ void AppUI::render() {
         }
     }
 
-    m_was_generating = m_engine->is_generating();
+    m_was_generating = is_generating;
 
     if (m_input_text.size() != m_last_input_size) {
         m_cached_input_words = count_words(m_input_text);
@@ -613,6 +616,11 @@ void AppUI::render_donation_button() {
     ImVec4 col_button = ImVec4(0.85f, 0.45f + 0.20f * pulse, 0.10f, 1.0f);
     ImVec4 col_button_hover = ImVec4(0.95f, 0.55f + 0.20f * pulse, 0.20f, 1.0f);
     ImVec4 col_button_active = ImVec4(0.75f, 0.35f, 0.05f, 1.0f);
+
+    ImGui::SameLine();
+    if (ImGui::Button(m_is_mini_mode ? "Expand UI##MiniToggle" : "Mini Overlay##MiniToggle")) {
+        toggle_mini_mode();
+    }
 
     ImGui::PushStyleColor(ImGuiCol_Button, col_button);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col_button_hover);
@@ -1208,6 +1216,20 @@ void AppUI::render_text_editors_panel() {
         if (clip) m_input_text = clip;
     }
 
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Export HTML##SaveHtmlFileBtn")) {
+        std::string err;
+        std::string html_path = std::string(m_export_path_buf) + ".html";
+        if (DocParser::save_html_document(html_path, "Translation Document", m_output_text, err)) {
+            m_status_msg = "Exported print-ready HTML to " + html_path;
+            m_status_is_error = false;
+        }
+        else {
+            m_status_msg = err;
+            m_status_is_error = true;
+        }
+    }
+
     ImGui::SameLine(ImGui::GetWindowWidth() - 185.0f);
     ImGui::TextDisabled("Words: %zu | Chars: %zu", m_cached_input_words, m_cached_input_chars);
 
@@ -1283,6 +1305,14 @@ void AppUI::render_status_bar() {
     else {
         ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "Status: %s", m_status_msg.c_str());
     }
+
+    if (m_engine->is_generating()) {
+        float tps = m_engine->get_live_tps();
+        ImGui::SameLine(0, 15.0f);
+        ImGui::TextColored(ImVec4(0.20f, 0.85f, 0.40f, 1.0f), "[Speed: %.1f tokens/sec]", tps);
+    }
+
+
 }
 
 
@@ -1376,4 +1406,18 @@ void AppUI::render_model_loading_overlay() {
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", msg);
 
     ImGui::End();
+}
+
+
+
+void AppUI::toggle_mini_mode() {
+    if (!m_sdl_window) return;
+    m_is_mini_mode = !m_is_mini_mode;
+    SDL_SetWindowAlwaysOnTop(m_sdl_window, m_is_mini_mode ? true : false);
+    if (m_is_mini_mode) {
+        SDL_SetWindowSize(m_sdl_window, 460, 320); // Compact mini float mode
+    }
+    else {
+        SDL_SetWindowSize(m_sdl_window, 1420, 880); // Restores full suite
+    }
 }

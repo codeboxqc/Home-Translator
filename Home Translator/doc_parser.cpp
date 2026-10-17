@@ -104,6 +104,47 @@ DocParser::FileType DocParser::detect_file_type(const std::string& filepath) {
     return FileType::UNKNOWN;
 }
 
+
+
+bool DocParser::save_html_document(
+    const std::string& filepath,
+    const std::string& title,
+    const std::string& translated_text,
+    std::string& out_error
+) {
+    std::ofstream out(filepath);
+    if (!out.is_open()) {
+        out_error = "Failed to open HTML file for writing: " + filepath;
+        return false;
+    }
+
+    out << "<!DOCTYPE html>\n<html>\n<head>\n<meta charset='utf-8'>\n"
+        << "<title>" << title << "</title>\n"
+        << "<style>\n"
+        << "body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e2e8f0; margin: 40px auto; max-width: 860px; line-height: 1.7; padding: 0 20px; }\n"
+        << "h1 { color: #38bdf8; border-bottom: 2px solid #1e293b; padding-bottom: 12px; font-size: 24px; }\n"
+        << "p { margin-bottom: 1.4em; font-size: 16px; background: #1e293b; padding: 14px 18px; border-radius: 8px; border-left: 4px solid #0284c7; }\n"
+        << ".footer { margin-top: 50px; font-size: 12px; color: #64748b; text-align: center; border-top: 1px solid #1e293b; padding-top: 20px; }\n"
+        << "</style>\n</head>\n<body>\n"
+        << "<h1>" << title << "</h1>\n";
+
+    std::istringstream iss(translated_text);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty()) {
+            out << "<p>" << line << "</p>\n";
+        }
+    }
+
+    out << "<div class='footer'>Generated with Local AI Translation & Publishing Suite Pro</div>\n"
+        << "</body>\n</html>";
+    return out.good();
+}
+
+
+
+
+
 bool DocParser::load_document(
     const std::string& filepath,
     std::string& out_text,

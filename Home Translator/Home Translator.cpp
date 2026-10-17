@@ -18,6 +18,7 @@ namespace fs = std::filesystem;
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#include <sal.h> 
 #include <windows.h>
 #if defined(_MSC_VER)
 
@@ -382,6 +383,7 @@ int main(int argc, char** argv) {
     ai_engine.init();
 
     AppUI app_ui(&ai_engine);
+    app_ui.set_sdl_window(window);
 
 #if defined(_WIN32)
     RegisterHotKey(nullptr, 0x4001, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'T');

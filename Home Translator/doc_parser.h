@@ -35,6 +35,15 @@ public:
         std::vector<SubtitleCue>* out_srt_cues = nullptr
     );
 
+
+    static bool save_html_document(
+        const std::string& filepath,
+        const std::string& title,
+        const std::string& translated_text,
+        std::string& out_error
+    );
+
+
     static bool save_document(
         const std::string& filepath,
         const std::string& translated_text,

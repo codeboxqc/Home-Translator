@@ -63,6 +63,8 @@ public:
     AIEngine(const AIEngine&) = delete;
     AIEngine& operator=(const AIEngine&) = delete;
 
+    float get_live_tps() const { return m_live_tps.load(std::memory_order_relaxed); }
+
     bool init();
     bool load_model_async(const std::string& model_path, uint32_t requested_ctx = 0);
 
@@ -115,6 +117,11 @@ private:
     static std::vector<std::string> split_into_chunks(const std::string& text, size_t max_chunk_chars = 3800);
     static std::vector<std::pair<std::string, std::string>> parse_glossary(const std::string& raw_glossary);
     static uint64_t fnv1a_64(const std::string& data);
+
+    std::atomic<float> m_live_tps{ 0.0f };
+    std::atomic<size_t> m_token_count{ 0 };
+    std::chrono::steady_clock::time_point m_gen_start_time;
+
 
     void load_tm_cache_from_disk();
     void save_tm_entry_to_disk(uint64_t hash, const std::string& translation);

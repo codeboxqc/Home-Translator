@@ -1000,6 +1000,14 @@ bool AIEngine::stream_callback_v2(const char* piece, size_t len, void* user_data
         }
     }
 
+    engine->m_token_count.fetch_add(1, std::memory_order_relaxed);
+    auto now_t = std::chrono::steady_clock::now();
+    double dt = std::chrono::duration<double>(now_t - engine->m_gen_start_time).count();
+    if (dt > 0.1) {
+        float tps = static_cast<float>(engine->m_token_count.load(std::memory_order_relaxed) / dt);
+        engine->m_live_tps.store(tps, std::memory_order_relaxed);
+    }
+
     engine->m_output_dirty = true;
     engine->m_output_revision++;
     return true;
@@ -1124,6 +1132,11 @@ void AIEngine::clear_output_text() {
     if (m_current_chunk_buffer.capacity() > 1048576) m_current_chunk_buffer.shrink_to_fit();
     m_output_dirty = false;
     m_output_revision++;
+
+    // Reset Token Counter & Timer
+    m_token_count.store(0, std::memory_order_relaxed);
+    m_live_tps.store(0.0f, std::memory_order_relaxed);
+    m_gen_start_time = std::chrono::steady_clock::now();
 }
 
 void AIEngine::get_chunk_progress(size_t& out_current, size_t& out_total, float& out_pct, size_t& out_tm_hits) const {

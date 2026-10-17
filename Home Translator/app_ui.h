@@ -5,6 +5,7 @@
 #ifndef APP_UI_H
 #define APP_UI_H
 
+#include <SDL3/SDL.h>
 #include "ai_engine.h"
 #include "doc_parser.h"
 #include "epub.h"
@@ -33,6 +34,10 @@ public:
     void handle_file_drop(const char* dropped_filepath);
     void trigger_hotkey_clipboard_translate();
 
+    void set_sdl_window(SDL_Window* window) { m_sdl_window = window; }
+    void toggle_mini_mode();
+
+
 private:
     void scan_available_models();
     int count_installed_official_presets() const;
@@ -41,6 +46,10 @@ private:
 
     void apply_dynamic_theme();
     void render_model_loading_overlay();
+
+    SDL_Window* m_sdl_window = nullptr;
+    bool m_is_mini_mode = false;
+
 
 
     void start_epub_format_translation();
