@@ -1,6 +1,6 @@
 ﻿/* ========================================================================== */
 /* Home Translator.cpp                                                        */
-/* Multi-Script Fonts, Global Hotkey (Ctrl+Alt+T) & Eco Idle Frame Throttling */
+/* Crash-Proof Window Focus & Safe Clipboard Main Loop                         */
 /* ========================================================================== */
 #define _CRT_SECURE_NO_WARNINGS
 #define SDL_MAIN_HANDLED
@@ -12,7 +12,6 @@
 #include <vector>
 #include <stdint.h>
 #include <chrono>
-#include <atomic>
 
 namespace fs = std::filesystem;
 
@@ -22,11 +21,7 @@ namespace fs = std::filesystem;
 #include <sal.h>
 #include <windows.h>
 #if defined(_MSC_VER)
-
-/////////////////////  hide cmd console
 #pragma comment(linker, "/subsystem:windows /ENTRY:mainCRTStartup")
-//////////////////
-
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "infer.lib")
@@ -46,46 +41,6 @@ namespace fs = std::filesystem;
 #include "doc_parser.h"
 #include "ai_engine.h"
 #include "app_ui.h"
-
-// Atomic guard preventing ImGui re-entrancy crash/freeze when screen recorders attach
-static std::atomic<bool> g_is_in_frame_render{ false };
-
-struct AppContext {
-    SDL_Window* window;
-    AIEngine* engine;
-    AppUI* ui;
-};
-
-static bool SDLCALL render_event_watch(void* userdata, SDL_Event* event) {
-    if (event->type == SDL_EVENT_WINDOW_EXPOSED || event->type == SDL_EVENT_WINDOW_MOVED) {
-        // Skip if main loop or another event watch is already inside ImGui frame
-        if (g_is_in_frame_render.exchange(true)) {
-            return true;
-        }
-
-        AppContext* ctx = static_cast<AppContext*>(userdata);
-        if (ctx && ctx->window && ctx->ui) {
-            int display_w = 0, display_h = 0;
-            SDL_GetWindowSizeInPixels(ctx->window, &display_w, &display_h);
-            if (display_w > 0 && display_h > 0) {
-                ImGui_ImplOpenGL3_NewFrame();
-                ImGui_ImplSDL3_NewFrame();
-                ImGui::NewFrame();
-
-                ctx->ui->render();
-
-                ImGui::Render();
-                glViewport(0, 0, display_w, display_h);
-                glClearColor(0.08f, 0.09f, 0.12f, 1.00f);
-                glClear(GL_COLOR_BUFFER_BIT);
-                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-                SDL_GL_SwapWindow(ctx->window);
-            }
-        }
-        g_is_in_frame_render.store(false);
-    }
-    return true;
-}
 
 namespace {
     bool try_load_font(
@@ -147,7 +102,7 @@ namespace {
         };
 
         static const ImWchar cjk_ranges[] = {
-            0x3000, 0x303F, 0x3040, 0x309F, 0x3100, 0x312F, 0x4E00, 0x9FFF, 0
+            0x3000, 0x303F, 0x3040, 0x309F, 0x4E00, 0x9FFF, 0
         };
 
         static const ImWchar other_ranges[] = {
@@ -406,6 +361,9 @@ int main(int argc, char** argv) {
     }
 
     SDL_GL_MakeCurrent(window, gl_context);
+
+    // Set V-Sync Swap Interval ONCE at initialization.
+    // NEVER call SDL_GL_SetSwapInterval inside the frame loop!
     SDL_GL_SetSwapInterval(1);
 
     IMGUI_CHECKVERSION();
@@ -426,9 +384,6 @@ int main(int argc, char** argv) {
     AppUI app_ui(&ai_engine);
     app_ui.set_sdl_window(window);
 
-    AppContext app_ctx{ window, &ai_engine, &app_ui };
-    SDL_AddEventWatch(render_event_watch, &app_ctx);
-
 #if defined(_WIN32)
     RegisterHotKey(nullptr, 0x4001, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'T');
 #endif
@@ -439,7 +394,7 @@ int main(int argc, char** argv) {
     bool running = true;
     while (running) {
 #if defined(_WIN32)
-        MSG win_msg;
+        MSG win_msg{};
         while (PeekMessage(&win_msg, nullptr, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {
             if (win_msg.wParam == 0x4001) {
                 SDL_RestoreWindow(window);
@@ -449,7 +404,7 @@ int main(int argc, char** argv) {
         }
 #endif
 
-        SDL_Event event;
+        SDL_Event event{};
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL3_ProcessEvent(&event);
 
@@ -469,53 +424,36 @@ int main(int argc, char** argv) {
         int display_w = 0, display_h = 0;
         SDL_GetWindowSizeInPixels(window, &display_w, &display_h);
 
+        // Safe minimize / hide handling: reset timing anchor so DeltaTime doesn't jump
         if ((flags & SDL_WINDOW_MINIMIZED) || (flags & SDL_WINDOW_HIDDEN) || display_w <= 0 || display_h <= 0) {
-            SDL_Delay(20);
+            SDL_Delay(33);
+            prev_frame_time = std::chrono::steady_clock::now();
             continue;
         }
 
-        // Render main frame protected against re-entrancy
-        if (!g_is_in_frame_render.exchange(true)) {
-            ImGui_ImplOpenGL3_NewFrame();
-            ImGui_ImplSDL3_NewFrame();
-            ImGui::NewFrame();
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
 
-            app_ui.render();
+        app_ui.render();
 
-            ImGui::Render();
+        ImGui::Render();
 
-            glViewport(0, 0, display_w, display_h);
-            glClearColor(0.08f, 0.09f, 0.12f, 1.00f);
-            glClear(GL_COLOR_BUFFER_BIT);
+        glViewport(0, 0, display_w, display_h);
+        glClearColor(0.08f, 0.09f, 0.12f, 1.00f);
+        glClear(GL_COLOR_BUFFER_BIT);
 
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-            SDL_GL_SwapWindow(window);
-
-            g_is_in_frame_render.store(false);
-        }
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        SDL_GL_SwapWindow(window);
 
         bool is_focused = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
-        bool is_busy = ai_engine.is_generating() || ai_engine.is_loading_model();
 
+        // Smooth frame pacing: V-Sync handles pacing when focused; eco-throttle when unfocused
         if (!is_focused) {
-            SDL_GL_SetSwapInterval(0); // Prevent Windows DWM VSync deadlock when idle/unfocused!
-            SDL_Delay(33);             // 30 FPS keeps region capture tools & overlays responsive
-        }
-        else {
-            SDL_GL_SetSwapInterval(1); // Enable VSync when focused and active
-            auto current_time = std::chrono::steady_clock::now();
-            int64_t elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current_time - prev_frame_time).count();
-            if (elapsed_ns > 0 && elapsed_ns < static_cast<int64_t>(TARGET_FRAME_NS)) {
-                uint32_t sleep_ms = static_cast<uint32_t>((static_cast<int64_t>(TARGET_FRAME_NS) - elapsed_ns) / 1000000LL);
-                if (sleep_ms > 0 && sleep_ms <= 16) {
-                    SDL_Delay(sleep_ms);
-                }
-            }
+            SDL_Delay(33); // ~30 FPS eco throttle when out of focus
         }
         prev_frame_time = std::chrono::steady_clock::now();
     }
-
-    SDL_RemoveEventWatch(render_event_watch, &app_ctx);
 
 #if defined(_WIN32)
     UnregisterHotKey(nullptr, 0x4001);

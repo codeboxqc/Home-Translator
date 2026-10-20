@@ -120,10 +120,19 @@ namespace {
 
     std::vector<std::string> tokenize_words_for_diff(const std::string& text, size_t max_words = 400) {
         std::vector<std::string> tokens;
-        std::istringstream iss(text);
-        std::string w;
-        while (iss >> w && tokens.size() < max_words) {
-            tokens.push_back(w);
+        tokens.reserve(std::min(max_words, static_cast<size_t>(text.size() / 5 + 1)));
+        size_t i = 0;
+        const size_t n = text.size();
+        while (i < n && tokens.size() < max_words) {
+            while (i < n && std::isspace(static_cast<unsigned char>(text[i]))) {
+                ++i;
+            }
+            if (i >= n) break;
+            size_t start = i;
+            while (i < n && !std::isspace(static_cast<unsigned char>(text[i]))) {
+                ++i;
+            }
+            tokens.emplace_back(text.data() + start, i - start);
         }
         return tokens;
     }
@@ -368,13 +377,19 @@ void AppUI::rebuild_diff_tokens() {
 void AppUI::handle_file_drop(const char* dropped_filepath) {
     if (!dropped_filepath) return;
 
-    std::string path(dropped_filepath);
-    m_status_msg = "Loading document... (Please wait)";
-    m_status_is_error = false;
+    if (m_file_load_pending.load()) {
+        m_status_msg = "A document is currently being loaded. Please wait...";
+        m_status_is_error = true;
+        return;
+    }
 
     if (m_file_load_thread.joinable()) {
         m_file_load_thread.join();
     }
+
+    std::string path(dropped_filepath);
+    m_status_msg = "Loading document... (Please wait)";
+    m_status_is_error = false;
 
     m_file_load_thread = std::thread([this, path]() {
         std::string error, loaded_content;
@@ -394,24 +409,38 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
 
 void AppUI::trigger_hotkey_clipboard_translate() {
     if (m_engine->is_generating() || m_engine->is_loading_model()) return;
-    const char* clip = ImGui::GetClipboardText();
-    if (clip && std::strlen(clip) > 0) {
-        m_input_text = clip;
-        m_input_source_idx = 1;
-        dispatch_ai_task(AITaskMode::Translate, false);
+
+    char* sdl_clip = SDL_GetClipboardText();
+    if (sdl_clip) {
+        if (std::strlen(sdl_clip) > 0) {
+            std::string clip_str(sdl_clip);
+            // Remove null bytes or non-printable control characters
+            clip_str.erase(std::remove(clip_str.begin(), clip_str.end(), '\0'), clip_str.end());
+
+            if (!clip_str.empty()) {
+                m_input_text = std::move(clip_str);
+                m_input_source_idx = 1;
+                dispatch_ai_task(AITaskMode::Translate, false);
+            }
+        }
+        SDL_free(sdl_clip);
     }
 }
 
 void AppUI::dispatch_ai_task(AITaskMode mode, bool is_retry) {
     if (!is_retry && m_input_source_idx == 1) {
-        const char* clipboard_text = ImGui::GetClipboardText();
-        if (clipboard_text && std::strlen(clipboard_text) > 0) {
-            m_input_text = clipboard_text;
+        char* sdl_clip = SDL_GetClipboardText();
+        if (sdl_clip && std::strlen(sdl_clip) > 0) {
+            m_input_text = sdl_clip;
+            SDL_free(sdl_clip);
         }
         else {
-            m_status_msg = "Clipboard is empty!";
-            m_status_is_error = true;
-            return;
+            if (sdl_clip) SDL_free(sdl_clip);
+            if (m_input_text.empty()) {
+                m_status_msg = "Clipboard is empty or locked by another process!";
+                m_status_is_error = true;
+                return;
+            }
         }
     }
 
@@ -453,7 +482,23 @@ void AppUI::dispatch_ai_task(AITaskMode mode, bool is_retry) {
 }
 
 void AppUI::render() {
+    // Process background model download completion regardless of whether download window is currently visible
+    if (!m_downloader.is_downloading() && m_downloader.is_completed()) {
+        scan_available_models();
+        std::string downloaded_path = m_downloader.get_downloaded_filepath();
+        for (size_t i = 0; i < m_available_models.size(); ++i) {
+            if (fs::path(m_available_models[i]).filename() == fs::path(downloaded_path).filename()) {
+                m_selected_model_idx = static_cast<int>(i);
+                break;
+            }
+        }
+        update_active_languages();
+        m_downloader.reset_completed_flag();
 
+        if (!downloaded_path.empty()) {
+            m_engine->load_model_async(downloaded_path, static_cast<uint32_t>(m_ctx_size));
+        }
+    }
 
     apply_dynamic_theme();
 
@@ -1212,9 +1257,15 @@ void AppUI::render_text_editors_panel() {
 
     ImGui::SameLine();
     if (ImGui::SmallButton("Paste Clipboard##PasteSourceClipBtn")) {
-        const char* clip = ImGui::GetClipboardText();
-        if (clip) m_input_text = clip;
+        char* sdl_clip = SDL_GetClipboardText();
+        if (sdl_clip) {
+            if (std::strlen(sdl_clip) > 0) {
+                m_input_text = sdl_clip;
+            }
+            SDL_free(sdl_clip);
+        }
     }
+
 
     ImGui::SameLine();
     if (ImGui::SmallButton("Export HTML##SaveHtmlFileBtn")) {
@@ -1244,11 +1295,15 @@ void AppUI::render_text_editors_panel() {
     ImGui::Checkbox("Auto-Scroll##ToggleAutoScroll", &m_auto_scroll);
 
     ImGui::SameLine();
+    // Copy Output Button:
     if (ImGui::SmallButton("Copy##CopyOutputTextBtn")) {
-        ImGui::SetClipboardText(m_output_text.c_str());
-        m_status_msg = "Copied output to system clipboard!";
-        m_status_is_error = false;
+        if (!m_output_text.empty()) {
+            SDL_SetClipboardText(m_output_text.c_str());
+            m_status_msg = "Copied output to system clipboard!";
+            m_status_is_error = false;
+        }
     }
+    
 
     ImGui::SameLine();
     ImGui::PushItemWidth(135.0f);

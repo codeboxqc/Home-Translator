@@ -392,6 +392,12 @@ std::string AIEngine::build_system_prompt(
         else {
             prompt += " CRITICAL INSTRUCTION: Do NOT generate or output any <think> tags, reasoning steps, or internal thoughts. Output ONLY the final answer directly.\n/no_think";
         }
+
+
+    }
+
+    if (opts.is_epub_task || active_chunk.find("[E") != std::string::npos) {
+        prompt += "\n\nCRITICAL EPUB FORMAT REQUIREMENT: The input text contains segment tags like [E1], [E2], [E3], etc. You MUST strictly preserve every [E#] tag at the start of its translated paragraph. Do NOT merge, remove, or alter any [E#] tags.";
     }
 
     return prompt;
@@ -445,39 +451,57 @@ std::string AIEngine::sanitize_thinking_output(const std::string& input) {
 
 std::vector<std::string> AIEngine::split_into_chunks(const std::string& text, size_t max_chunk_chars) {
     std::vector<std::string> chunks;
+    if (text.empty()) return chunks;
 
-    if (text.size() >= 5 && text.compare(0, 4, "[E1]") == 0) {
-        size_t pos = 0;
+    // Check if input contains EPUB segment markers [E#]
+    size_t first_marker = text.find("[E");
+    if (first_marker != std::string::npos && first_marker + 2 < text.size() && std::isdigit(static_cast<unsigned char>(text[first_marker + 2]))) {
+        size_t pos = first_marker;
         const size_t n = text.size();
+        std::string current_chunk;
+        current_chunk.reserve(max_chunk_chars + 512);
+
         while (pos < n) {
             size_t open_br = text.find("[E", pos);
-            if (open_br == std::string::npos) break;
+            if (open_br == std::string::npos) {
+                if (pos < n && !current_chunk.empty()) {
+                    current_chunk += text.substr(pos);
+                }
+                break;
+            }
 
             size_t next_br = std::string::npos;
             size_t search_p = open_br + 2;
             while (search_p < n) {
-                size_t cand = text.find("\n[E", search_p);
+                size_t cand = text.find("[E", search_p);
                 if (cand == std::string::npos) break;
-                size_t d = cand + 3;
-                while (d < n && std::isdigit(static_cast<unsigned char>(text[d]))) d++;
-                if (d > cand + 3 && d < n && text[d] == ']') {
-                    next_br = cand + 1;
-                    break;
+                if (cand > 0 && (text[cand - 1] == '\n' || text[cand - 1] == '\r' || std::isspace(static_cast<unsigned char>(text[cand - 1])))) {
+                    size_t d = cand + 2;
+                    while (d < n && std::isdigit(static_cast<unsigned char>(text[d]))) d++;
+                    if (d > cand + 2 && d < n && text[d] == ']') {
+                        next_br = cand;
+                        break;
+                    }
                 }
-                search_p = cand + 3;
+                search_p = cand + 2;
             }
 
             std::string seg = (next_br == std::string::npos)
                 ? text.substr(open_br)
                 : text.substr(open_br, next_br - open_br);
 
-            while (!seg.empty() && (seg.back() == '\n' || seg.back() == '\r' || seg.back() == ' ')) {
-                seg.pop_back();
+            if (!current_chunk.empty() && current_chunk.size() + seg.size() > max_chunk_chars) {
+                chunks.push_back(std::move(current_chunk));
+                current_chunk.clear();
+                current_chunk.reserve(max_chunk_chars + 512);
             }
-            if (!seg.empty()) {
-                chunks.push_back(seg);
-            }
+
+            current_chunk += seg;
             pos = (next_br == std::string::npos) ? n : next_br;
+        }
+
+        if (!current_chunk.empty()) {
+            chunks.push_back(std::move(current_chunk));
         }
 
         if (!chunks.empty()) {
@@ -540,6 +564,9 @@ std::vector<std::string> AIEngine::split_into_chunks(const std::string& text, si
     }
     return chunks;
 }
+
+
+
 
 bool AIEngine::start_task(const std::string& input_text, const AIEngineOptions& opts) {
     if (!m_ctx || !m_model_loaded.load() || m_is_loading_model.load()) {
@@ -608,39 +635,45 @@ bool AIEngine::start_auto_correct_task(
 void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
     configure_task_sampler(opts);
 
-
-
-
-    // ==========================================
-   // CHAT MODE: Multi-Turn Conversation
-   // ==========================================
-    if (opts.mode == AITaskMode::Chat) {
-        std::string sys_prompt = build_system_prompt(opts, "", {});
+    // =========================================================
+    // CHAT & CODE MODE: Full Input Single-Turn Prompting
+    // =========================================================
+    if (opts.mode == AITaskMode::Chat || opts.mode == AITaskMode::CodeAssistant) {
+        std::string sys_prompt = build_system_prompt(opts, input_text, {});
 
         std::vector<infer_chat_msg> msgs;
         msgs.reserve(opts.chat_history.size() + 2);
 
         // 1. System Prompt
-        infer_chat_msg sys_msg;
+        infer_chat_msg sys_msg{};
         sys_msg.role = "system";
         sys_msg.content = sys_prompt.c_str();
         msgs.push_back(sys_msg);
 
-        // 2. All past conversation turns (Memory)
-        for (const auto& msg : opts.chat_history) {
-            infer_chat_msg m;
-            m.role = msg.role.c_str();
-            m.content = msg.content.c_str();
-            msgs.push_back(m);
+        // 2. Chat History (Memory)
+        if (opts.mode == AITaskMode::Chat) {
+            for (const auto& msg : opts.chat_history) {
+                infer_chat_msg m{};
+                m.role = msg.role.c_str();
+                m.content = msg.content.c_str();
+                msgs.push_back(m);
+            }
         }
 
-        // 3. New question from user
-        infer_chat_msg user_msg;
+        // 3. User Input / Code Prompt
+        infer_chat_msg user_msg{};
         user_msg.role = "user";
         user_msg.content = input_text.c_str();
         msgs.push_back(user_msg);
 
-        int32_t effective_max_tokens = (m_is_qwen3.load() && opts.qwen3_deep_think) ? 4096 : 2048;
+        uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
+        int32_t effective_max_tokens = std::clamp<int32_t>(
+            opts.max_tokens > 0 ? opts.max_tokens : static_cast<int32_t>(active_ctx / 2),
+            2048, 8192
+        );
+        if (m_is_qwen3.load() && opts.qwen3_deep_think) {
+            effective_max_tokens = std::max(effective_max_tokens, 4096);
+        }
 
         {
             std::lock_guard<std::mutex> lock(m_output_mutex);
@@ -654,13 +687,16 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
         if (!dispatched) {
             char err_buf[512] = { 0 };
             infer_get_last_error(m_ctx, err_buf, sizeof(err_buf));
-            set_error(std::string("Failed to dispatch chat: ") + err_buf);
+            set_error(std::string("Failed to dispatch task: ") + err_buf);
         }
 
         m_is_task_running.store(false);
-        return; // Done! Skip all translation logic below
+        return;
     }
 
+    // =========================================================
+    // EPUB CONTINUOUS EBOOK TRANSLATION
+    // =========================================================
     if (opts.is_epub_task) {
         std::string temp_dir, epub_err;
         std::vector<std::string> rel_html_files;
@@ -670,7 +706,6 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
             return;
         }
 
-        // FIX: RAII guard guarantees temp_dir deletion on exit/abort/error
         struct TempCleanupGuard {
             std::string path;
             ~TempCleanupGuard() {
@@ -709,7 +744,7 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
 
             auto glossary = parse_glossary(opts.glossary_raw);
             uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
-            size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 95) / 100, 1500, 14000);
+            size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 80) / 100, 1500, 12000);
             int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 8192));
 
             std::vector<std::string> file_chunks = split_into_chunks(prompt_text, auto_chunk_chars);
@@ -741,7 +776,7 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
                         m_current_chunk_buffer.clear();
                     }
 
-                    infer_chat_msg msgs[2];
+                    infer_chat_msg msgs[2]{};
                     msgs[0].role = "system";
                     msgs[0].content = sys_prompt.c_str();
                     msgs[1].role = "user";
@@ -784,7 +819,8 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
             auto file_translated_map = EpubProcessor::parse_translated_markers(file_translated_accumulator, segments.size());
             EpubProcessor::write_single_file_translation(full_path.string(), skeleton_xml, segments, file_translated_map);
 
-            cumulative_translated_summary += "\n[Completed " + rel_html_files[file_idx] + "]\n" + file_translated_accumulator;
+            std::string log_entry = "Completed " + rel_html_files[file_idx] + " (" + std::to_string(file_idx + 1) + "/" + std::to_string(rel_html_files.size()) + " files)\n";
+            cumulative_translated_summary += log_entry;
 
             {
                 std::lock_guard<std::mutex> lock(m_output_mutex);
@@ -805,6 +841,9 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
         m_is_task_running.store(false);
         return;
     }
+
+    // Standard document / plain text chunked translation...
+    // [Rest of task_thread_proc remains unchanged]
 
     // Standard task execution...
     uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
@@ -883,7 +922,7 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
             m_current_chunk_buffer.clear();
         }
 
-        infer_chat_msg msgs[4];
+        infer_chat_msg msgs[4]{};
         size_t msg_count = 0;
 
         msgs[msg_count].role = "system";
@@ -1085,22 +1124,29 @@ std::string AIEngine::get_loaded_model_path() const {
 
 bool AIEngine::get_output_text_if_dirty(std::string& out_text, uint64_t& inout_rev) {
     bool is_q3 = m_is_qwen3.load(std::memory_order_relaxed);
+    std::string raw_buffer;
+    bool dirty = false;
 
-    std::lock_guard<std::mutex> lock(m_output_mutex);
-    if (m_output_revision == inout_rev && !m_output_dirty) {
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(m_output_mutex);
+        if (m_output_revision == inout_rev && !m_output_dirty) {
+            return false;
+        }
+
+        if (m_output_dirty) {
+            m_output_dirty = false;
+            inout_rev = m_output_revision;
+            raw_buffer = m_output_buffer;
+            dirty = true;
+        }
     }
 
-    if (m_output_dirty) {
-        m_output_dirty = false;
-        inout_rev = m_output_revision;
-
-        // FIX: Avoid creating temporary raw_copy string on heap
-        if (is_q3 || m_output_buffer.find("<think>") != std::string::npos) {
-            out_text = sanitize_thinking_output(m_output_buffer);
+    if (dirty) {
+        if (is_q3 || raw_buffer.find("<think>") != std::string::npos) {
+            out_text = sanitize_thinking_output(raw_buffer);
         }
         else {
-            out_text = m_output_buffer;
+            out_text = std::move(raw_buffer);
         }
         return true;
     }

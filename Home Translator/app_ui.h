@@ -19,7 +19,8 @@
 #include <atomic>
 
 struct DiffToken {
-    enum Type { Same, Removed, Added } type;
+    enum Type { Same, Removed, Added };
+    Type type = Same;
     std::string text;
 };
 

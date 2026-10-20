@@ -410,7 +410,8 @@ bool DocParser::read_docx_file(const std::string& filepath, std::string& out_tex
         return read_text_file(filepath, out_text, out_error);
     }
 
-    fs::path temp_dir = fs::temp_directory_path() / "home_translator_docx_tmp";
+    static std::atomic<uint64_t> s_docx_counter{ 0 };
+    fs::path temp_dir = fs::temp_directory_path() / ("home_translator_docx_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_docx_counter));
     std::error_code ec;
     fs::remove_all(temp_dir, ec);
     fs::create_directories(temp_dir, ec);
@@ -435,7 +436,8 @@ bool DocParser::read_docx_file(const std::string& filepath, std::string& out_tex
 }
 
 bool DocParser::read_epub_file(const std::string& filepath, std::string& out_text, std::string& out_error) {
-    fs::path temp_dir = fs::temp_directory_path() / "home_translator_epub_tmp";
+    static std::atomic<uint64_t> s_epub_counter{ 0 };
+    fs::path temp_dir = fs::temp_directory_path() / ("home_translator_epub_tmp_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_epub_counter));
     std::error_code ec;
     fs::remove_all(temp_dir, ec);
     fs::create_directories(temp_dir, ec);
@@ -488,7 +490,8 @@ bool DocParser::read_pdf_file(const std::string& filepath, std::string& out_text
     file.close();
 
     if (std::strncmp(header, "%PDF", 4) == 0) {
-        fs::path temp_txt = fs::temp_directory_path() / "home_translator_pdf_tmp.txt";
+        static std::atomic<uint64_t> s_pdf_counter{ 0 };
+        fs::path temp_txt = fs::temp_directory_path() / ("home_translator_pdf_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_pdf_counter) + ".txt");
         std::string cmd = "pdftotext -enc UTF-8 \"" + filepath + "\" \"" + temp_txt.string() + "\"";
         if (execute_tool_silent(cmd) == 0 && fs::exists(temp_txt)) {
             bool ok = read_text_file(temp_txt.string(), out_text, out_error);

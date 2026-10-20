@@ -15,7 +15,7 @@
 #include <unordered_map>
 
 struct EpubSegment {
-    size_t id;
+    size_t id{ 0 };
     std::string original_text;
 };
 
