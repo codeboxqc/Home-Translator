@@ -1,11 +1,18 @@
 /* ========================================================================== */
 /* doc_parser.cpp                                                             */
-/* Zero-Dependency Parser for TXT, SRT/VTT, DOCX, EPUB, JSON/PO & Exports     */
+/* Crash-Proof Parser for TXT, SRT/VTT, DOCX, EPUB, JSON/PO & Exports         */
 /* ========================================================================== */
+#ifndef _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#endif
+
 #include "doc_parser.h"
+#include "epub.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +30,14 @@
 namespace fs = std::filesystem;
 
 namespace {
+    fs::path utf8_to_path(const std::string& utf8_str) {
+#if defined(__cpp_char8_t)
+        return fs::path(std::u8string_view(reinterpret_cast<const char8_t*>(utf8_str.data()), utf8_str.size()));
+#else
+        return fs::u8path(utf8_str.begin(), utf8_str.end());
+#endif
+    }
+
     void replace_all(std::string& s, const std::string& from, const std::string& to) {
         size_t pos = 0;
         while ((pos = s.find(from, pos)) != std::string::npos) {
@@ -56,7 +71,6 @@ namespace {
         if (!CreateProcessA(nullptr, cmd_buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
             return -1;
         }
-        // 10-second timeout avoids hanging the application
         DWORD wait_res = WaitForSingleObject(pi.hProcess, 10000);
         if (wait_res == WAIT_TIMEOUT) {
             TerminateProcess(pi.hProcess, 1);
@@ -104,15 +118,13 @@ DocParser::FileType DocParser::detect_file_type(const std::string& filepath) {
     return FileType::UNKNOWN;
 }
 
-
-
 bool DocParser::save_html_document(
     const std::string& filepath,
     const std::string& title,
     const std::string& translated_text,
     std::string& out_error
 ) {
-    std::ofstream out(filepath);
+    std::ofstream out(utf8_to_path(filepath), std::ios::out | std::ios::binary);
     if (!out.is_open()) {
         out_error = "Failed to open HTML file for writing: " + filepath;
         return false;
@@ -140,10 +152,6 @@ bool DocParser::save_html_document(
         << "</body>\n</html>";
     return out.good();
 }
-
-
-
-
 
 bool DocParser::load_document(
     const std::string& filepath,
@@ -184,7 +192,7 @@ bool DocParser::save_document(
     const std::vector<SubtitleCue>& srt_cues,
     std::string& out_error
 ) {
-    std::ofstream out(filepath, std::ios::out | std::ios::binary);
+    std::ofstream out(utf8_to_path(filepath), std::ios::out | std::ios::binary);
     if (!out.is_open()) {
         out_error = "Failed to open output file for writing: " + filepath;
         return false;
@@ -234,7 +242,7 @@ bool DocParser::save_document(
 }
 
 bool DocParser::read_text_file(const std::string& filepath, std::string& out_text, std::string& out_error) {
-    std::ifstream file(filepath, std::ios::in | std::ios::binary);
+    std::ifstream file(utf8_to_path(filepath), std::ios::in | std::ios::binary);
     if (!file.is_open()) {
         out_error = "Failed to open file: " + filepath;
         return false;
@@ -396,7 +404,8 @@ std::string DocParser::strip_xml_tags(const std::string& xml_content, bool is_do
 }
 
 bool DocParser::read_docx_file(const std::string& filepath, std::string& out_text, std::string& out_error) {
-    std::ifstream file(filepath, std::ios::in | std::ios::binary);
+    fs::path p = utf8_to_path(filepath);
+    std::ifstream file(p, std::ios::in | std::ios::binary);
     if (!file.is_open()) {
         out_error = "Failed to open DOCX file: " + filepath;
         return false;
@@ -411,23 +420,26 @@ bool DocParser::read_docx_file(const std::string& filepath, std::string& out_tex
     }
 
     static std::atomic<uint64_t> s_docx_counter{ 0 };
-    fs::path temp_dir = fs::temp_directory_path() / ("home_translator_docx_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_docx_counter));
     std::error_code ec;
+    fs::path temp_dir = fs::temp_directory_path(ec) / ("home_translator_docx_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_docx_counter));
     fs::remove_all(temp_dir, ec);
     fs::create_directories(temp_dir, ec);
 
-    std::string cmd = "tar -xf \"" + filepath + "\" -C \"" + temp_dir.string() + "\" word/document.xml";
-    int rc = execute_tool_silent(cmd);
-    fs::path doc_xml = temp_dir / "word" / "document.xml";
+    // Use native LibZip instead of external tar command
+    if (!EpubProcessor::extract_zip_archive(p.string(), temp_dir.u8string(), out_error)) {
+        fs::remove_all(temp_dir, ec);
+        return false;
+    }
 
-    if (rc != 0 || !fs::exists(doc_xml)) {
+    fs::path doc_xml = temp_dir / "word" / "document.xml";
+    if (!fs::exists(doc_xml, ec)) {
         fs::remove_all(temp_dir, ec);
         out_error = "Failed to extract word/document.xml from DOCX archive.";
         return false;
     }
 
     std::string xml_raw;
-    bool ok = read_text_file(doc_xml.string(), xml_raw, out_error);
+    bool ok = read_text_file(doc_xml.u8string(), xml_raw, out_error);
     fs::remove_all(temp_dir, ec);
 
     if (!ok) return false;
@@ -436,19 +448,24 @@ bool DocParser::read_docx_file(const std::string& filepath, std::string& out_tex
 }
 
 bool DocParser::read_epub_file(const std::string& filepath, std::string& out_text, std::string& out_error) {
+    fs::path p = utf8_to_path(filepath);
     static std::atomic<uint64_t> s_epub_counter{ 0 };
-    fs::path temp_dir = fs::temp_directory_path() / ("home_translator_epub_tmp_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_epub_counter));
     std::error_code ec;
+    fs::path temp_dir = fs::temp_directory_path(ec) / ("home_translator_epub_tmp_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_epub_counter));
     fs::remove_all(temp_dir, ec);
     fs::create_directories(temp_dir, ec);
 
-    std::string cmd = "tar -xf \"" + filepath + "\" -C \"" + temp_dir.string() + "\"";
-    execute_tool_silent(cmd);
+    // Use native LibZip instead of external tar command
+    if (!EpubProcessor::extract_zip_archive(p.string(), temp_dir.u8string(), out_error)) {
+        fs::remove_all(temp_dir, ec);
+        return false;
+    }
 
     std::vector<fs::path> chapters;
     for (const auto& entry : fs::recursive_directory_iterator(temp_dir, ec)) {
-        if (entry.is_regular_file()) {
-            std::string ext = entry.path().extension().string();
+        if (entry.is_regular_file(ec)) {
+            std::string ext = entry.path().extension().u8string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (ext == ".xhtml" || ext == ".html" || ext == ".htm") {
                 chapters.push_back(entry.path());
             }
@@ -460,7 +477,7 @@ bool DocParser::read_epub_file(const std::string& filepath, std::string& out_tex
 
     for (const auto& ch : chapters) {
         std::string raw_html, err;
-        if (read_text_file(ch.string(), raw_html, err)) {
+        if (read_text_file(ch.u8string(), raw_html, err)) {
             std::string clean = strip_xml_tags(raw_html, false);
             if (!clean.empty()) {
                 full_book << clean << "\n\n";
@@ -479,7 +496,8 @@ bool DocParser::read_epub_file(const std::string& filepath, std::string& out_tex
 
 bool DocParser::read_pdf_file(const std::string& filepath, std::string& out_text, std::string& out_error) {
     out_text.clear();
-    std::ifstream file(filepath, std::ios::in | std::ios::binary);
+    fs::path p = utf8_to_path(filepath);
+    std::ifstream file(p, std::ios::in | std::ios::binary);
     if (!file.is_open()) {
         out_error = "Failed to open PDF file: " + filepath;
         return false;
@@ -491,11 +509,11 @@ bool DocParser::read_pdf_file(const std::string& filepath, std::string& out_text
 
     if (std::strncmp(header, "%PDF", 4) == 0) {
         static std::atomic<uint64_t> s_pdf_counter{ 0 };
-        fs::path temp_txt = fs::temp_directory_path() / ("home_translator_pdf_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_pdf_counter) + ".txt");
-        std::string cmd = "pdftotext -enc UTF-8 \"" + filepath + "\" \"" + temp_txt.string() + "\"";
-        if (execute_tool_silent(cmd) == 0 && fs::exists(temp_txt)) {
-            bool ok = read_text_file(temp_txt.string(), out_text, out_error);
-            std::error_code ec;
+        std::error_code ec;
+        fs::path temp_txt = fs::temp_directory_path(ec) / ("home_translator_pdf_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_pdf_counter) + ".txt");
+        std::string cmd = "pdftotext -enc UTF-8 \"" + p.string() + "\" \"" + temp_txt.string() + "\"";
+        if (execute_tool_silent(cmd) == 0 && fs::exists(temp_txt, ec)) {
+            bool ok = read_text_file(temp_txt.u8string(), out_text, out_error);
             fs::remove(temp_txt, ec);
             if (ok && !out_text.empty()) return true;
         }

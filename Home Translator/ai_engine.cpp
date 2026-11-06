@@ -1,7 +1,14 @@
-
 /* ========================================================================== */
 /* ai_engine.cpp                                                              */
 /* ========================================================================== */
+
+
+#ifndef _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#endif
+
+
+
 #include "ai_engine.h"
 
 #include <algorithm>
@@ -12,6 +19,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+
 
 namespace fs = std::filesystem;
 
@@ -133,7 +141,8 @@ bool AIEngine::load_model_async(const std::string& model_path, uint32_t requeste
     m_is_loading_model.store(true);
     clear_error();
 
-    uint32_t safe_ctx = (requested_ctx == 0) ? 0u : std::clamp(requested_ctx, 512u, 131072u);
+    uint32_t safe_ctx = (requested_ctx == 0) ? 4096u : std::clamp(requested_ctx, 512u, 32768u);
+
 
     m_model_load_thread = std::thread([this, model_path, safe_ctx]() {
         (void)infer_memory_clear(m_ctx);
@@ -145,7 +154,7 @@ bool AIEngine::load_model_async(const std::string& model_path, uint32_t requeste
         infer_model_params mparams = infer_model_default_params();
         mparams.struct_size = sizeof(infer_model_params);
         mparams.requested_ctx = safe_ctx;
-        mparams.n_gpu_layers = 999;
+        mparams.n_gpu_layers = -1; // full gpu
         mparams.use_mmap = true;
         mparams.flash_attn = true;
 
@@ -156,13 +165,56 @@ bool AIEngine::load_model_async(const std::string& model_path, uint32_t requeste
         bool success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
         bool used_gpu = true;
 
+        // ATTEMPT 2 (Fallback 1): Partial GPU offload (27 layers)
         if (!success) {
             mparams.kv_type_k = INFER_KV_TYPE_F16;
             mparams.kv_type_v = INFER_KV_TYPE_F16;
-            mparams.requested_ctx = 2048;
-            mparams.n_gpu_layers = 0;
+            mparams.requested_ctx = 2048; // Reduce context size to save VRAM
+            mparams.n_gpu_layers = 27;    // Put 27 layers on GPU, rest on CPU
+
             success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
-            used_gpu = false;
+            used_gpu = success;           // If this succeeds, the GPU is partially being used
+        }
+
+        // ATTEMPT 2 (Fallback  ): Partial GPU offload  
+        if (!success) {
+            mparams.kv_type_k = INFER_KV_TYPE_F16;
+            mparams.kv_type_v = INFER_KV_TYPE_F16;
+            mparams.requested_ctx = 2048; // Reduce context size to save VRAM
+            mparams.n_gpu_layers = 25;    // Put 27 layers on GPU, rest on CPU
+
+            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
+            used_gpu = success;           // If this succeeds, the GPU is partially being used
+        }
+
+        // ATTEMPT 2 (Fallback  ): Partial GPU offload  
+        if (!success) {
+            mparams.kv_type_k = INFER_KV_TYPE_F16;
+            mparams.kv_type_v = INFER_KV_TYPE_F16;
+            mparams.requested_ctx = 2048; // Reduce context size to save VRAM
+            mparams.n_gpu_layers = 18;    // Put 27 layers on GPU, rest on CPU
+
+            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
+            used_gpu = success;           // If this succeeds, the GPU is partially being used
+        }
+
+
+        // ATTEMPT 2 (Fallback  ): Partial GPU offload  
+        if (!success) {
+            mparams.kv_type_k = INFER_KV_TYPE_F16;
+            mparams.kv_type_v = INFER_KV_TYPE_F16;
+            mparams.requested_ctx = 2048;  
+            mparams.n_gpu_layers = 10;    
+
+            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
+            used_gpu = success;           // If this succeeds, the GPU is partially being used
+        }
+
+        //  Fallback 2  CPU only
+        if (!success) {
+            mparams.n_gpu_layers = 0;     
+            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
+            used_gpu = false;           
         }
 
         if (success && mparams.n_gpu_layers == 0) {
@@ -671,6 +723,8 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
             opts.max_tokens > 0 ? opts.max_tokens : static_cast<int32_t>(active_ctx / 2),
             2048, 8192
         );
+
+
         if (m_is_qwen3.load() && opts.qwen3_deep_think) {
             effective_max_tokens = std::max(effective_max_tokens, 4096);
         }
@@ -743,9 +797,10 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
             }
 
             auto glossary = parse_glossary(opts.glossary_raw);
+
             uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
-            size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 80) / 100, 1500, 12000);
-            int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 8192));
+            size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 60) / 100, 1200, 2800);
+            int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 4096));
 
             std::vector<std::string> file_chunks = split_into_chunks(prompt_text, auto_chunk_chars);
             std::string file_translated_accumulator;
@@ -842,13 +897,11 @@ void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
         return;
     }
 
-    // Standard document / plain text chunked translation...
-    // [Rest of task_thread_proc remains unchanged]
-
-    // Standard task execution...
+ 
+   // Standard task execution...
     uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
-    size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 95) / 100, 1500, 14000);
-    int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 8192));
+    size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 60) / 100, 1200, 2800);
+    int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 4096)); 
 
     std::vector<std::string> chunks = split_into_chunks(input_text, auto_chunk_chars);
     auto glossary = parse_glossary(opts.glossary_raw);
@@ -1143,10 +1196,11 @@ bool AIEngine::get_output_text_if_dirty(std::string& out_text, uint64_t& inout_r
 
     if (dirty) {
         if (is_q3 || raw_buffer.find("<think>") != std::string::npos) {
-            out_text = sanitize_thinking_output(raw_buffer);
+            std::string clean = sanitize_thinking_output(raw_buffer);
+            out_text.assign(clean.data(), clean.size());
         }
         else {
-            out_text = std::move(raw_buffer);
+            out_text.assign(raw_buffer.data(), raw_buffer.size());
         }
         return true;
     }

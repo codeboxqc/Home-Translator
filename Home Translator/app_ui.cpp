@@ -20,6 +20,7 @@
 #include <cmath>
 #include <filesystem>
 #include <sstream>
+#include <imgui_internal.h>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -31,26 +32,35 @@
 
 namespace fs = std::filesystem;
 
+#ifndef _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#endif
+
 std::string open_file_dialog_epub() {
 #if defined(_WIN32)
-    char filename[MAX_PATH] = { 0 };
-    OPENFILENAMEA ofn;
+    wchar_t filename[4096] = { 0 };
+    OPENFILENAMEW ofn;
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = nullptr;
-    ofn.lpstrFilter = "EPUB Books (*.epub)\0*.epub\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"EPUB Books (*.epub)\0*.epub\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
-    ofn.lpstrDefExt = "epub";
+    ofn.nMaxFile = 4096;
+    // CRITICAL: OFN_NOCHANGEDIR prevents Windows from changing the app's working directory!
+    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"epub";
 
-    if (GetOpenFileNameA(&ofn)) {
-        return std::string(filename);
+    if (GetOpenFileNameW(&ofn)) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
+        if (len > 1) {
+            std::string utf8_path(static_cast<size_t>(len - 1), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, filename, -1, utf8_path.data(), len, nullptr, nullptr);
+            return utf8_path;
+        }
     }
 #endif
     return "";
 }
-
 namespace {
     struct InputTextCallback_UserData {
         std::string* Str;
@@ -58,12 +68,17 @@ namespace {
         void* ChainCallbackUserData;
     };
 
+   
+
+   
+     
     static int InputTextCallback(ImGuiInputTextCallbackData* data) {
         InputTextCallback_UserData* user_data = static_cast<InputTextCallback_UserData*>(data->UserData);
         if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
             std::string* str = user_data->Str;
-            str->resize(data->BufTextLen);
-            data->Buf = const_cast<char*>(str->c_str());
+            str->resize(static_cast<size_t>(data->BufTextLen));
+            data->Buf = str->data();
+            data->BufSize = static_cast<int>(str->capacity()) + 1;
         }
         else if (user_data->ChainCallback) {
             data->UserData = user_data->ChainCallbackUserData;
@@ -78,11 +93,14 @@ namespace {
         const ImVec2& size = ImVec2(0, 0),
         ImGuiInputTextFlags flags = 0
     ) {
+        if (str->capacity() < 64) {
+            str->reserve(64);
+        }
         flags |= ImGuiInputTextFlags_CallbackResize;
         InputTextCallback_UserData cb_user_data{ str, nullptr, nullptr };
         return ImGui::InputTextMultiline(
             label,
-            const_cast<char*>(str->c_str()),
+            str->data(),
             str->capacity() + 1,
             size,
             flags,
@@ -97,18 +115,25 @@ namespace {
         std::string* str,
         ImGuiInputTextFlags flags = 0
     ) {
+        if (str->capacity() < 64) {
+            str->reserve(64);
+        }
         flags |= ImGuiInputTextFlags_CallbackResize;
         InputTextCallback_UserData cb_user_data{ str, nullptr, nullptr };
         return ImGui::InputTextWithHint(
             label,
             hint,
-            const_cast<char*>(str->c_str()),
+            str->data(),
             str->capacity() + 1,
             flags,
             InputTextCallback,
             &cb_user_data
         );
     }
+
+
+
+
 
     bool is_file_present(const std::string& filename) {
         return fs::exists("models/" + filename) || fs::exists(filename);
@@ -218,7 +243,7 @@ void AppUI::start_epub_format_translation() {
     m_engine->clear_output_text();
 
     if (m_engine->start_task("EPUB_TASK", opts)) {
-        m_status_msg = "EPUB Continuous File-by-File Converter Running: " + fs::path(in_path).filename().string() + "...";
+        m_status_msg = "EPUB Continuous File-by-File Converter Running: " + fs::u8path(in_path).filename().u8string() + "...";
         m_status_is_error = false;
     }
     else {
@@ -394,8 +419,17 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
     m_file_load_thread = std::thread([this, path]() {
         std::string error, loaded_content;
         std::vector<SubtitleCue> cues;
-        bool success = DocParser::load_document(path, loaded_content, error, &cues);
-        DocParser::FileType ft = DocParser::detect_file_type(path);
+        DocParser::FileType ft = DocParser::FileType::UNKNOWN;
+        try {
+            bool success = DocParser::load_document(path, loaded_content, error, &cues);
+            if (!success && error.empty()) {
+                error = "Failed to load document.";
+            }
+            ft = DocParser::detect_file_type(path);
+        }
+        catch (const std::exception& ex) {
+            error = std::string("File exception: ") + ex.what();
+        }
 
         std::lock_guard<std::mutex> file_lock(m_file_load_mutex);
         m_async_loaded_content = std::move(loaded_content);
@@ -523,6 +557,8 @@ void AppUI::render() {
         }
 
         if (loaded_error.empty()) {
+            
+            ImGui::ClearActiveID(); // Prevents ImGui from crashing if InputText was focused during file load!
             m_input_text = std::move(loaded_content);
             m_loaded_srt_cues = std::move(loaded_cues);
             snprintf(m_doc_path_buf, sizeof(m_doc_path_buf), "%s", loaded_path.c_str());
@@ -1329,6 +1365,23 @@ void AppUI::render_text_editors_panel() {
     if (m_show_inline_diff) {
         render_inline_diff_view();
     }
+    else if (m_engine->is_generating()) {
+        // Ultra-fast unformatted streaming view (only renders last 8 KB during live generation)
+        ImGui::BeginChild("##StreamingOutputScroll", ImVec2(-FLT_MIN, -FLT_MIN), true);
+        ImGui::PushTextWrapPos(0.0f);
+        const char* begin = m_output_text.data();
+        const char* end = begin + m_output_text.size();
+        if (m_output_text.size() > 8192) {
+            begin = end - 8192;
+            while (begin < end && (*begin & 0xC0) == 0x80) ++begin; // Align to UTF-8 boundary
+        }
+        ImGui::TextUnformatted(begin, end);
+        ImGui::PopTextWrapPos();
+        if (m_auto_scroll) {
+            ImGui::SetScrollHereY(1.0f);
+        }
+        ImGui::EndChild();
+    }
     else {
         InputTextMultilineStdString(
             "##OutputText",
@@ -1336,9 +1389,6 @@ void AppUI::render_text_editors_panel() {
             ImVec2(-FLT_MIN, -FLT_MIN),
             ImGuiInputTextFlags_ReadOnly
         );
-        if (m_auto_scroll && m_engine->is_generating()) {
-            ImGui::SetScrollHereY(1.0f);
-        }
     }
     ImGui::EndChild();
 }

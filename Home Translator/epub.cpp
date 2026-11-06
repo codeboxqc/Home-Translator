@@ -1,8 +1,11 @@
-
 /* ========================================================================== */
 /* epub.cpp                                                                   */
 /* LibZip-Powered Layout-Preserving EPUB Extractor & Repackager               */
 /* ========================================================================== */
+#ifndef _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#endif
+
 #include "epub.h"
 
 #include <zip.h> // Native LibZip Header
@@ -15,13 +18,24 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
 namespace fs = std::filesystem;
 
 namespace {
+
+    // C++20 compliant UTF-8 string to std::filesystem::path converter
+    fs::path path_from_utf8(std::string_view utf8_str) {
+#if defined(__cpp_char8_t)
+        return fs::path(std::u8string_view(reinterpret_cast<const char8_t*>(utf8_str.data()), utf8_str.size()));
+#else
+        return fs::u8path(utf8_str.begin(), utf8_str.end());
+#endif
+    }
 
     bool read_raw_file(const fs::path& p, std::string& out) {
         std::ifstream f(p, std::ios::in | std::ios::binary);
@@ -244,29 +258,30 @@ bool EpubProcessor::prepare_epub_extraction(
     std::vector<std::string>& out_rel_html_files,
     std::string& out_error
 ) {
-    if (!fs::exists(input_epub_filepath)) {
+    std::error_code ec;
+    fs::path in_path = path_from_utf8(input_epub_filepath);
+    if (!fs::exists(in_path, ec)) {
         out_error = "EPUB file does not exist: " + input_epub_filepath;
         return false;
     }
 
     static std::atomic<uint64_t> temp_counter{ 0 };
-    fs::path temp_dir = fs::temp_directory_path() / ("home_translator_epub_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++temp_counter));
+    fs::path temp_dir = fs::temp_directory_path(ec) / ("home_translator_epub_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++temp_counter));
 
-    std::error_code ec;
     fs::remove_all(temp_dir, ec);
     fs::create_directories(temp_dir, ec);
 
-    if (!extract_zip_archive(input_epub_filepath, temp_dir.string(), out_error)) {
+    if (!extract_zip_archive(in_path.string(), temp_dir.u8string(), out_error)) {
         fs::remove_all(temp_dir, ec);
         return false;
     }
 
-    out_temp_dir = temp_dir.string();
+    out_temp_dir = temp_dir.u8string();
 
     std::vector<fs::path> html_paths;
     for (const auto& entry : fs::recursive_directory_iterator(temp_dir, ec)) {
-        if (entry.is_regular_file()) {
-            std::string ext = to_lower_ascii(entry.path().extension().string());
+        if (entry.is_regular_file(ec)) {
+            std::string ext = to_lower_ascii(entry.path().extension().u8string());
             if (ext == ".xhtml" || ext == ".html" || ext == ".htm") {
                 html_paths.push_back(entry.path());
             }
@@ -277,7 +292,7 @@ bool EpubProcessor::prepare_epub_extraction(
 
     out_rel_html_files.clear();
     for (const auto& p : html_paths) {
-        out_rel_html_files.push_back(fs::relative(p, temp_dir, ec).generic_string());
+        out_rel_html_files.push_back(fs::relative(p, temp_dir, ec).generic_u8string());
     }
 
     if (out_rel_html_files.empty()) {
@@ -300,7 +315,7 @@ bool EpubProcessor::extract_single_file_segments(
     out_prompt_text.clear();
 
     std::string xml;
-    if (!read_raw_file(full_path, xml) || xml.empty()) return false;
+    if (!read_raw_file(path_from_utf8(full_path), xml) || xml.empty()) return false;
 
     std::ostringstream prompt_stream;
     std::string skeleton;
@@ -440,7 +455,7 @@ bool EpubProcessor::write_single_file_translation(
         pos += replacement.size();
     }
 
-    return write_raw_file(full_path, rebuilt_xml);
+    return write_raw_file(path_from_utf8(full_path), rebuilt_xml);
 }
 
 bool EpubProcessor::finalize_epub_repack(
@@ -449,14 +464,14 @@ bool EpubProcessor::finalize_epub_repack(
     std::string& out_error
 ) {
     std::error_code ec;
-    fs::path abs_out = fs::absolute(output_epub_filepath, ec);
+    fs::path abs_out = fs::absolute(path_from_utf8(output_epub_filepath), ec);
     if (fs::exists(abs_out, ec)) {
         fs::remove(abs_out, ec);
     }
     fs::create_directories(abs_out.parent_path(), ec);
 
     bool ok = create_epub_archive(temp_dir, abs_out.string(), out_error);
-    fs::remove_all(temp_dir, ec);
+    fs::remove_all(path_from_utf8(temp_dir), ec);
     return ok;
 }
 
@@ -473,7 +488,7 @@ bool EpubProcessor::translate_epub_tag_by_tag(
     }
 
     for (const auto& rel_file : rel_files) {
-        fs::path full_path = fs::path(temp_dir) / fs::u8path(rel_file);
+        fs::path full_path = fs::path(temp_dir) / path_from_utf8(rel_file);
         std::vector<EpubSegment> segments;
         std::string skeleton, prompt_text;
         if (!extract_single_file_segments(full_path.string(), segments, skeleton, prompt_text)) {
@@ -520,7 +535,7 @@ bool EpubProcessor::extract_zip_archive(
         struct zip_stat st;
         if (zip_stat_index(archive, i, 0, &st) != 0) continue;
 
-        fs::path out_file_path = fs::path(dest_dir) / fs::u8path(st.name);
+        fs::path out_file_path = fs::path(dest_dir) / path_from_utf8(st.name);
 
         size_t name_len = std::strlen(st.name);
         if (name_len > 0 && (st.name[name_len - 1] == '/' || st.name[name_len - 1] == '\\')) {
@@ -663,7 +678,7 @@ bool EpubProcessor::extract_for_translation(
 
     std::ostringstream prompt_stream;
     for (const auto& rel_file : rel_html_files) {
-        fs::path full_path = fs::path(temp_dir) / fs::u8path(rel_file);
+        fs::path full_path = fs::path(temp_dir) / path_from_utf8(rel_file);
         process_xhtml_file(full_path.string(), rel_file, out_state, prompt_stream);
     }
 
@@ -692,7 +707,7 @@ bool EpubProcessor::rebuild_translated_epub(
     auto translated_map = parse_translated_markers(translated_combined_text, state.segments.size());
 
     for (const auto& ch : state.chapters) {
-        fs::path full_chapter_path = fs::path(state.temp_extract_dir) / fs::u8path(ch.rel_path);
+        fs::path full_chapter_path = fs::path(state.temp_extract_dir) / path_from_utf8(ch.rel_path);
         if (!write_single_file_translation(full_chapter_path.string(), ch.skeleton_xml, state.segments, translated_map)) {
             out_error = "Failed to update XHTML file: " + ch.rel_path;
             return false;

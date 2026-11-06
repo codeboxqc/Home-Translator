@@ -364,13 +364,12 @@ int main(int argc, char** argv) {
 
     // Set V-Sync Swap Interval ONCE at initialization.
     // NEVER call SDL_GL_SetSwapInterval inside the frame loop!
-    SDL_GL_SetSwapInterval(1);
+    SDL_GL_SetSwapInterval(0);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigMemoryCompactTimer = -1.0f;
 
     setup_unicode_fonts(io);
     setup_modern_theme();
@@ -389,10 +388,10 @@ int main(int argc, char** argv) {
 #endif
 
     constexpr uint64_t TARGET_FRAME_NS = 1000000000ULL / 60ULL; // 60 FPS (~16.6 ms)
-    auto prev_frame_time = std::chrono::steady_clock::now();
 
     bool running = true;
     while (running) {
+        const auto frame_start = std::chrono::steady_clock::now();
 #if defined(_WIN32)
         MSG win_msg{};
         while (PeekMessage(&win_msg, nullptr, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {
@@ -424,15 +423,20 @@ int main(int argc, char** argv) {
         int display_w = 0, display_h = 0;
         SDL_GetWindowSizeInPixels(window, &display_w, &display_h);
 
-        // Safe minimize / hide handling: reset timing anchor so DeltaTime doesn't jump
+        // Safe minimize / hide handling
         if ((flags & SDL_WINDOW_MINIMIZED) || (flags & SDL_WINDOW_HIDDEN) || display_w <= 0 || display_h <= 0) {
             SDL_Delay(33);
-            prev_frame_time = std::chrono::steady_clock::now();
             continue;
         }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
+
+        // Guard against 0.0f / NaN DeltaTime in fast Release builds and large spikes on restore
+        if (!(io.DeltaTime > 0.0001f) || io.DeltaTime > 0.1f) {
+            io.DeltaTime = 1.0f / 60.0f;
+        }
+
         ImGui::NewFrame();
 
         app_ui.render();
@@ -446,13 +450,16 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
 
-        bool is_focused = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
-
-        // Smooth frame pacing: V-Sync handles pacing when focused; eco-throttle when unfocused
-        if (!is_focused) {
-            SDL_Delay(33); // ~30 FPS eco throttle when out of focus
+        const bool is_focused = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
+        const uint64_t target_ns = is_focused ? TARGET_FRAME_NS : (1000000000ULL / 25ULL);
+        const uint64_t elapsed_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - frame_start
+            ).count()
+            );
+        if (elapsed_ns < target_ns) {
+            SDL_DelayNS(target_ns - elapsed_ns);
         }
-        prev_frame_time = std::chrono::steady_clock::now();
     }
 
 #if defined(_WIN32)
