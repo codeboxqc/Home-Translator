@@ -90,8 +90,10 @@ public:
 
     void abort();
     void wait();
+    void shutdown();
 
     bool is_generating() const;
+    bool was_cancelled() const { return m_cancel_requested.load(std::memory_order_acquire); }
     bool is_loading_model() const;
     bool is_model_loaded() const;
     bool is_qwen3_loaded() const;
@@ -117,6 +119,7 @@ private:
     static std::vector<std::string> split_into_chunks(const std::string& text, size_t max_chunk_chars = 3800);
     static std::vector<std::pair<std::string, std::string>> parse_glossary(const std::string& raw_glossary);
     static uint64_t fnv1a_64(const std::string& data);
+    static bool validate_gguf_file(const std::string& model_path, uint64_t& out_file_size, std::string& out_error);
 
     std::atomic<float> m_live_tps{ 0.0f };
     std::atomic<size_t> m_token_count{ 0 };
@@ -138,9 +141,12 @@ private:
 
     void task_thread_proc(std::string input_text, AIEngineOptions opts);
 
-    infer_ctx* m_ctx = nullptr;
+    std::mutex m_ctx_init_mutex;
+    std::atomic<infer_ctx*> m_ctx{ nullptr };
     std::atomic<bool> m_model_loaded{ false };
     std::atomic<bool> m_is_loading_model{ false };
+    std::atomic<bool> m_abort_load{ false };
+    std::atomic<bool> m_shutting_down{ false };
     std::atomic<bool> m_is_qwen3{ false };
     std::atomic<uint32_t> m_active_ctx{ 4096 };
     std::atomic<bool> m_is_using_gpu{ true };
@@ -151,6 +157,8 @@ private:
 
     std::thread m_task_thread;
     std::atomic<bool> m_is_task_running{ false };
+    std::atomic<bool> m_cancel_requested{ false };
+    std::atomic<bool> m_stop_hit_in_callback{ false };
     mutable std::mutex m_chunk_mutex;
     size_t m_current_chunk{ 0 };
     size_t m_total_chunks{ 0 };

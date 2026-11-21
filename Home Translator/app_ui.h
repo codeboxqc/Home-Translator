@@ -113,6 +113,7 @@ private:
     size_t m_last_input_size{ 0 };
     double m_last_word_count_time{ 0.0 };
     bool m_was_generating{ false };
+    bool m_was_loading_model{ false };
 
     std::vector<const char*> m_active_lang_ptrs;
     int m_in_lang_idx = 0;
@@ -129,6 +130,7 @@ private:
     // Async doc loading state
     std::thread m_file_load_thread; // FIX: Declared m_file_load_thread
     std::mutex m_file_load_mutex;
+    std::atomic<bool> m_file_load_in_progress{ false };
     std::atomic<bool> m_file_load_pending{ false };
     std::string m_async_loaded_content;
     std::vector<SubtitleCue> m_async_loaded_cues;

@@ -378,7 +378,8 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     AIEngine ai_engine;
-    ai_engine.init();
+    // Backend initialization is performed asynchronously inside AIEngine::load_model_async()
+    // so loading CUDA/Vulkan DLLs never blocks the GUI thread before the event loop starts.
 
     AppUI app_ui(&ai_engine);
     app_ui.set_sdl_window(window);
@@ -423,10 +424,18 @@ int main(int argc, char** argv) {
         int display_w = 0, display_h = 0;
         SDL_GetWindowSizeInPixels(window, &display_w, &display_h);
 
-        // Safe minimize / hide handling
-        if ((flags & SDL_WINDOW_MINIMIZED) || (flags & SDL_WINDOW_HIDDEN) || display_w <= 0 || display_h <= 0) {
+        // Safe minimize / hide / occlusion handling (avoid unnecessary GPU/OpenGL contention while hidden or fully covered)
+        if ((flags & SDL_WINDOW_MINIMIZED) || (flags & SDL_WINDOW_HIDDEN) || (flags & SDL_WINDOW_OCCLUDED) ||
+            display_w <= 0 || display_h <= 0) {
             SDL_Delay(33);
             continue;
+        }
+
+        if (SDL_GL_GetCurrentContext() != gl_context) {
+            if (!SDL_GL_MakeCurrent(window, gl_context)) {
+                SDL_Delay(33);
+                continue;
+            }
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -451,7 +460,7 @@ int main(int argc, char** argv) {
         SDL_GL_SwapWindow(window);
 
         const bool is_focused = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
-        const uint64_t target_ns = is_focused ? TARGET_FRAME_NS : (1000000000ULL / 25ULL);
+        const uint64_t target_ns = is_focused ? TARGET_FRAME_NS : (1000000000ULL / 15ULL);
         const uint64_t elapsed_ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - frame_start
@@ -466,8 +475,9 @@ int main(int argc, char** argv) {
     UnregisterHotKey(nullptr, 0x4001);
 #endif
 
-    ai_engine.abort();
-    ai_engine.wait();
+    // Hide the window immediately so user sees instant close while background threads wind down cleanly
+    SDL_HideWindow(window);
+    ai_engine.shutdown();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();

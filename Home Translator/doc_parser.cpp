@@ -38,6 +38,11 @@ namespace {
 #endif
     }
 
+    std::string path_to_utf8(const fs::path& p) {
+        auto u8 = p.u8string();
+        return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+    }
+
     void replace_all(std::string& s, const std::string& from, const std::string& to) {
         size_t pos = 0;
         while ((pos = s.find(from, pos)) != std::string::npos) {
@@ -426,7 +431,7 @@ bool DocParser::read_docx_file(const std::string& filepath, std::string& out_tex
     fs::create_directories(temp_dir, ec);
 
     // Use native LibZip instead of external tar command
-    if (!EpubProcessor::extract_zip_archive(p.string(), temp_dir.u8string(), out_error)) {
+    if (!EpubProcessor::extract_zip_archive(p.string(), path_to_utf8(temp_dir), out_error)) {
         fs::remove_all(temp_dir, ec);
         return false;
     }
@@ -439,7 +444,7 @@ bool DocParser::read_docx_file(const std::string& filepath, std::string& out_tex
     }
 
     std::string xml_raw;
-    bool ok = read_text_file(doc_xml.u8string(), xml_raw, out_error);
+    bool ok = read_text_file(path_to_utf8(doc_xml), xml_raw, out_error);
     fs::remove_all(temp_dir, ec);
 
     if (!ok) return false;
@@ -456,15 +461,16 @@ bool DocParser::read_epub_file(const std::string& filepath, std::string& out_tex
     fs::create_directories(temp_dir, ec);
 
     // Use native LibZip instead of external tar command
-    if (!EpubProcessor::extract_zip_archive(p.string(), temp_dir.u8string(), out_error)) {
+    if (!EpubProcessor::extract_zip_archive(p.string(), path_to_utf8(temp_dir), out_error)) {
         fs::remove_all(temp_dir, ec);
         return false;
     }
 
     std::vector<fs::path> chapters;
     for (const auto& entry : fs::recursive_directory_iterator(temp_dir, ec)) {
+        if (ec) break;
         if (entry.is_regular_file(ec)) {
-            std::string ext = entry.path().extension().u8string();
+            std::string ext = path_to_utf8(entry.path().extension());
             std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (ext == ".xhtml" || ext == ".html" || ext == ".htm") {
                 chapters.push_back(entry.path());
@@ -477,7 +483,7 @@ bool DocParser::read_epub_file(const std::string& filepath, std::string& out_tex
 
     for (const auto& ch : chapters) {
         std::string raw_html, err;
-        if (read_text_file(ch.u8string(), raw_html, err)) {
+        if (read_text_file(path_to_utf8(ch), raw_html, err)) {
             std::string clean = strip_xml_tags(raw_html, false);
             if (!clean.empty()) {
                 full_book << clean << "\n\n";
@@ -513,7 +519,7 @@ bool DocParser::read_pdf_file(const std::string& filepath, std::string& out_text
         fs::path temp_txt = fs::temp_directory_path(ec) / ("home_translator_pdf_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(++s_pdf_counter) + ".txt");
         std::string cmd = "pdftotext -enc UTF-8 \"" + p.string() + "\" \"" + temp_txt.string() + "\"";
         if (execute_tool_silent(cmd) == 0 && fs::exists(temp_txt, ec)) {
-            bool ok = read_text_file(temp_txt.u8string(), out_text, out_error);
+            bool ok = read_text_file(path_to_utf8(temp_txt), out_text, out_error);
             fs::remove(temp_txt, ec);
             if (ok && !out_text.empty()) return true;
         }

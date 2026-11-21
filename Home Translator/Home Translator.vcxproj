@@ -24,6 +24,7 @@
     <ProjectGuid>{21295aac-d132-436c-8a8d-36fe56099055}</ProjectGuid>
     <RootNamespace>HomeTranslator</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <VcpkgApplocalDeps>false</VcpkgApplocalDeps>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">

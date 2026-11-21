@@ -36,13 +36,20 @@ namespace fs = std::filesystem;
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
 #endif
 
-std::string open_file_dialog_epub() {
+std::string open_file_dialog_epub(SDL_Window* sdl_window) {
 #if defined(_WIN32)
     wchar_t filename[4096] = { 0 };
     OPENFILENAMEW ofn;
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = nullptr;
+    HWND owner_hwnd = nullptr;
+    if (sdl_window) {
+        SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window);
+        if (props) {
+            owner_hwnd = static_cast<HWND>(SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+        }
+    }
+    ofn.hwndOwner = owner_hwnd;
     ofn.lpstrFilter = L"EPUB Books (*.epub)\0*.epub\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = 4096;
@@ -58,6 +65,8 @@ std::string open_file_dialog_epub() {
             return utf8_path;
         }
     }
+#else
+    (void)sdl_window;
 #endif
     return "";
 }
@@ -135,8 +144,22 @@ namespace {
 
 
 
+    fs::path path_from_utf8_ui(const std::string& utf8_str) {
+#if defined(__cpp_char8_t)
+        return fs::path(std::u8string_view(reinterpret_cast<const char8_t*>(utf8_str.data()), utf8_str.size()));
+#else
+        return fs::u8path(utf8_str.begin(), utf8_str.end());
+#endif
+    }
+
+    std::string utf8_from_path_ui(const fs::path& p) {
+        auto u8 = p.u8string();
+        return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+    }
+
     bool is_file_present(const std::string& filename) {
-        return fs::exists("models/" + filename) || fs::exists(filename);
+        std::error_code ec1, ec2;
+        return fs::exists("models/" + filename, ec1) || fs::exists(filename, ec2);
     }
 
     void open_url(const std::string& url) {
@@ -202,7 +225,7 @@ void AppUI::apply_layout_directive() {
 }
 
 void AppUI::start_epub_format_translation() {
-    std::string in_path = open_file_dialog_epub();
+    std::string in_path = open_file_dialog_epub(m_sdl_window);
     if (in_path.empty()) {
         return;
     }
@@ -243,7 +266,7 @@ void AppUI::start_epub_format_translation() {
     m_engine->clear_output_text();
 
     if (m_engine->start_task("EPUB_TASK", opts)) {
-        m_status_msg = "EPUB Continuous File-by-File Converter Running: " + fs::u8path(in_path).filename().u8string() + "...";
+        m_status_msg = "EPUB Continuous File-by-File Converter Running: " + utf8_from_path_ui(path_from_utf8_ui(in_path).filename()) + "...";
         m_status_is_error = false;
     }
     else {
@@ -258,10 +281,13 @@ void AppUI::scan_available_models() {
 
     const std::vector<std::string> search_paths = { "models", "." };
     for (const auto& sp : search_paths) {
-        if (fs::exists(sp) && fs::is_directory(sp)) {
-            for (const auto& entry : fs::directory_iterator(sp)) {
-                if (entry.is_regular_file() && entry.path().extension() == ".gguf") {
-                    m_available_models.push_back(entry.path().string());
+        std::error_code ec;
+        if (fs::exists(sp, ec) && !ec && fs::is_directory(sp, ec) && !ec) {
+            for (const auto& entry : fs::directory_iterator(sp, ec)) {
+                if (ec) break;
+                std::error_code entry_ec;
+                if (entry.is_regular_file(entry_ec) && !entry_ec && entry.path().extension() == ".gguf") {
+                    m_available_models.push_back(utf8_from_path_ui(entry.path()));
                 }
             }
         }
@@ -402,7 +428,8 @@ void AppUI::rebuild_diff_tokens() {
 void AppUI::handle_file_drop(const char* dropped_filepath) {
     if (!dropped_filepath) return;
 
-    if (m_file_load_pending.load()) {
+    if (m_file_load_in_progress.load(std::memory_order_acquire) ||
+        m_file_load_pending.load(std::memory_order_acquire)) {
         m_status_msg = "A document is currently being loaded. Please wait...";
         m_status_is_error = true;
         return;
@@ -415,8 +442,14 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
     std::string path(dropped_filepath);
     m_status_msg = "Loading document... (Please wait)";
     m_status_is_error = false;
+    m_file_load_in_progress.store(true, std::memory_order_release);
 
     m_file_load_thread = std::thread([this, path]() {
+        struct FileLoadGuard {
+            std::atomic<bool>& flag;
+            ~FileLoadGuard() { flag.store(false, std::memory_order_release); }
+        } load_guard{ m_file_load_in_progress };
+
         std::string error, loaded_content;
         std::vector<SubtitleCue> cues;
         DocParser::FileType ft = DocParser::FileType::UNKNOWN;
@@ -430,6 +463,9 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
         catch (const std::exception& ex) {
             error = std::string("File exception: ") + ex.what();
         }
+        catch (...) {
+            error = "Unknown exception while loading document.";
+        }
 
         std::lock_guard<std::mutex> file_lock(m_file_load_mutex);
         m_async_loaded_content = std::move(loaded_content);
@@ -437,7 +473,7 @@ void AppUI::handle_file_drop(const char* dropped_filepath) {
         m_async_loaded_path = path;
         m_async_loaded_ft = ft;
         m_async_loaded_error = std::move(error);
-        m_file_load_pending.store(true);
+        m_file_load_pending.store(true, std::memory_order_release);
         });
 }
 
@@ -452,6 +488,9 @@ void AppUI::trigger_hotkey_clipboard_translate() {
             clip_str.erase(std::remove(clip_str.begin(), clip_str.end(), '\0'), clip_str.end());
 
             if (!clip_str.empty()) {
+                if (ImGui::GetCurrentContext()) {
+                    ImGui::ClearActiveID();
+                }
                 m_input_text = std::move(clip_str);
                 m_input_source_idx = 1;
                 dispatch_ai_task(AITaskMode::Translate, false);
@@ -465,6 +504,9 @@ void AppUI::dispatch_ai_task(AITaskMode mode, bool is_retry) {
     if (!is_retry && m_input_source_idx == 1) {
         char* sdl_clip = SDL_GetClipboardText();
         if (sdl_clip && std::strlen(sdl_clip) > 0) {
+            if (ImGui::GetCurrentContext()) {
+                ImGui::ClearActiveID();
+            }
             m_input_text = sdl_clip;
             SDL_free(sdl_clip);
         }
@@ -602,6 +644,20 @@ void AppUI::render() {
         output_updated = m_engine->get_output_text_if_dirty(m_output_text, m_output_revision);
     }
 
+    bool is_loading_now = m_engine->is_loading_model();
+    if (m_was_loading_model && !is_loading_now) {
+        std::string load_err = m_engine->get_last_error();
+        if (!load_err.empty()) {
+            m_status_msg = load_err;
+            m_status_is_error = true;
+        }
+        else if (m_engine->is_model_loaded()) {
+            m_status_msg = "Model loaded and ready: " + m_engine->get_loaded_model_path();
+            m_status_is_error = false;
+        }
+    }
+    m_was_loading_model = is_loading_now;
+
     bool is_generating = m_engine->is_generating();
     bool just_finished = m_was_generating && !is_generating;
 
@@ -614,7 +670,24 @@ void AppUI::render() {
     }
 
     if (just_finished) {
-        if (m_last_task_mode == AITaskMode::Chat) {
+        bool was_cancelled = m_engine->was_cancelled();
+        std::string err_str = m_engine->get_last_error();
+
+        if (was_cancelled) {
+            m_cached_output_words = count_words(m_output_text);
+            m_cached_output_chars = m_output_text.size();
+            m_status_msg = "Generation cancelled by user.";
+            m_status_is_error = true;
+            m_is_headless_epub_task = false;
+        }
+        else if (!err_str.empty()) {
+            m_cached_output_words = count_words(m_output_text);
+            m_cached_output_chars = m_output_text.size();
+            m_status_msg = m_is_headless_epub_task ? ("EPUB Conversion Error: " + err_str) : err_str;
+            m_status_is_error = true;
+            m_is_headless_epub_task = false;
+        }
+        else if (m_last_task_mode == AITaskMode::Chat) {
             // Store both user question and AI answer in memory!
             m_chat_history.push_back({ "user", m_last_chat_input });
             m_chat_history.push_back({ "assistant", m_output_text });
@@ -625,15 +698,8 @@ void AppUI::render() {
             m_status_is_error = false;
         }
         else if (m_is_headless_epub_task) {
-            std::string err_str = m_engine->get_last_error();
-            if (err_str.empty()) {
-                m_status_msg = "Successfully created converted EPUB: " + m_headless_epub_out_path;
-                m_status_is_error = false;
-            }
-            else {
-                m_status_msg = "EPUB Conversion Error: " + err_str;
-                m_status_is_error = true;
-            }
+            m_status_msg = "Successfully created converted EPUB: " + m_headless_epub_out_path;
+            m_status_is_error = false;
             m_is_headless_epub_task = false;
         }
         else {
@@ -1221,7 +1287,9 @@ void AppUI::render_controls_panel() {
 
     ImGui::SameLine(0, 6.0f);
 
+    if (generating) ImGui::BeginDisabled();
     if (ImGui::Button("Clear All##EditorsClearAllBtn", ImVec2(80, 34))) {
+        ImGui::ClearActiveID();
         m_chat_history.clear();
         m_last_chat_input.clear();
         m_input_text.clear();
@@ -1246,6 +1314,7 @@ void AppUI::render_controls_panel() {
         m_status_msg = "Cleared editors and reclaimed heap memory.";
         m_status_is_error = false;
     }
+    if (generating) ImGui::EndDisabled();
 }
 
 void AppUI::render_inline_diff_view() {

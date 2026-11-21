@@ -37,6 +37,16 @@ namespace {
 #endif
     }
 
+    std::string utf8_from_path(const fs::path& p) {
+        auto u8 = p.u8string();
+        return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+    }
+
+    std::string generic_utf8_from_path(const fs::path& p) {
+        auto u8 = p.generic_u8string();
+        return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+    }
+
     bool read_raw_file(const fs::path& p, std::string& out) {
         std::ifstream f(p, std::ios::in | std::ios::binary);
         if (!f.is_open()) return false;
@@ -271,17 +281,18 @@ bool EpubProcessor::prepare_epub_extraction(
     fs::remove_all(temp_dir, ec);
     fs::create_directories(temp_dir, ec);
 
-    if (!extract_zip_archive(in_path.string(), temp_dir.u8string(), out_error)) {
+    if (!extract_zip_archive(in_path.string(), utf8_from_path(temp_dir), out_error)) {
         fs::remove_all(temp_dir, ec);
         return false;
     }
 
-    out_temp_dir = temp_dir.u8string();
+    out_temp_dir = utf8_from_path(temp_dir);
 
     std::vector<fs::path> html_paths;
     for (const auto& entry : fs::recursive_directory_iterator(temp_dir, ec)) {
+        if (ec) break;
         if (entry.is_regular_file(ec)) {
-            std::string ext = to_lower_ascii(entry.path().extension().u8string());
+            std::string ext = to_lower_ascii(utf8_from_path(entry.path().extension()));
             if (ext == ".xhtml" || ext == ".html" || ext == ".htm") {
                 html_paths.push_back(entry.path());
             }
@@ -292,7 +303,7 @@ bool EpubProcessor::prepare_epub_extraction(
 
     out_rel_html_files.clear();
     for (const auto& p : html_paths) {
-        out_rel_html_files.push_back(fs::relative(p, temp_dir, ec).generic_u8string());
+        out_rel_html_files.push_back(generic_utf8_from_path(fs::relative(p, temp_dir, ec)));
     }
 
     if (out_rel_html_files.empty()) {
@@ -531,11 +542,13 @@ bool EpubProcessor::extract_zip_archive(
     zip_int64_t num_entries = zip_get_num_entries(archive, 0);
     std::vector<char> buffer(65536);
 
+    fs::path dest_root = path_from_utf8(dest_dir);
     for (zip_int64_t i = 0; i < num_entries; ++i) {
         struct zip_stat st;
         if (zip_stat_index(archive, i, 0, &st) != 0) continue;
+        if (!(st.valid & ZIP_STAT_NAME) || !st.name) continue;
 
-        fs::path out_file_path = fs::path(dest_dir) / path_from_utf8(st.name);
+        fs::path out_file_path = dest_root / path_from_utf8(st.name);
 
         size_t name_len = std::strlen(st.name);
         if (name_len > 0 && (st.name[name_len - 1] == '/' || st.name[name_len - 1] == '\\')) {
@@ -601,17 +614,20 @@ bool EpubProcessor::create_epub_archive(
         }
         };
 
-    fs::path mimetype_path = fs::path(src_dir) / "mimetype";
-    if (fs::exists(mimetype_path)) {
+    std::error_code ec;
+    fs::path src_root = path_from_utf8(src_dir);
+    fs::path mimetype_path = src_root / "mimetype";
+    if (fs::exists(mimetype_path, ec) && !ec) {
         add_file_to_zip(mimetype_path, "mimetype", ZIP_CM_STORE);
     }
 
-    std::error_code ec;
-    for (const auto& entry : fs::recursive_directory_iterator(src_dir, ec)) {
-        if (!entry.is_regular_file()) continue;
+    for (const auto& entry : fs::recursive_directory_iterator(src_root, ec)) {
+        if (ec) break;
+        std::error_code entry_ec;
+        if (!entry.is_regular_file(entry_ec) || entry_ec) continue;
 
-        std::string rel_path = fs::relative(entry.path(), src_dir, ec).generic_string();
-        if (rel_path == "mimetype") continue;
+        std::string rel_path = generic_utf8_from_path(fs::relative(entry.path(), src_root, ec));
+        if (ec || rel_path == "mimetype") continue;
 
         add_file_to_zip(entry.path(), rel_path, ZIP_CM_DEFAULT);
     }

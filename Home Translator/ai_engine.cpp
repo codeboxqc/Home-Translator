@@ -24,6 +24,19 @@
 namespace fs = std::filesystem;
 
 namespace {
+    fs::path utf8_to_fs_path(const std::string& utf8_str) {
+#if defined(__cpp_char8_t)
+        return fs::path(std::u8string_view(reinterpret_cast<const char8_t*>(utf8_str.data()), utf8_str.size()));
+#else
+        return fs::u8path(utf8_str.begin(), utf8_str.end());
+#endif
+    }
+
+    std::string fs_path_to_utf8(const fs::path& p) {
+        auto u8 = p.u8string();
+        return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+    }
+
     bool extract_single_epub_marker(const std::string& chunk, std::string& out_marker, std::string& out_clean_text) {
         size_t pos = 0;
         while (pos < chunk.size() && std::isspace(static_cast<unsigned char>(chunk[pos]))) pos++;
@@ -53,27 +66,35 @@ AIEngine::AIEngine() {
 }
 
 AIEngine::~AIEngine() {
+    shutdown();
+    infer_ctx* ctx = m_ctx.exchange(nullptr, std::memory_order_acq_rel);
+    if (ctx) {
+        infer_free(ctx);
+    }
+}
+
+void AIEngine::shutdown() {
+    m_shutting_down.store(true, std::memory_order_release);
     abort();
     wait();
     if (m_model_load_thread.joinable()) {
         m_model_load_thread.join();
     }
-    if (m_task_thread.joinable()) {
-        m_task_thread.join();
-    }
-    if (m_ctx) {
-        infer_free(m_ctx);
-        m_ctx = nullptr;
-    }
 }
 
 bool AIEngine::init() {
-    if (m_ctx) return true;
-    m_ctx = infer_init();
-    if (!m_ctx) {
-        set_error("Failed to allocate infer_ctx context instance.");
+    if (m_ctx.load(std::memory_order_acquire)) return true;
+    std::lock_guard<std::mutex> lock(m_ctx_init_mutex);
+    if (m_ctx.load(std::memory_order_acquire)) return true;
+    if (m_shutting_down.load(std::memory_order_acquire)) return false;
+
+    char err_buf[512] = { 0 };
+    infer_ctx* ctx = infer_init_ex(err_buf, sizeof(err_buf));
+    if (!ctx) {
+        set_error(err_buf[0] ? std::string(err_buf) : "Failed to allocate infer_ctx context instance.");
         return false;
     }
+    m_ctx.store(ctx, std::memory_order_release);
     return true;
 }
 
@@ -107,7 +128,8 @@ void AIEngine::save_tm_entry_to_disk(uint64_t hash, const std::string& translati
     std::lock_guard<std::mutex> lock(m_tm_mutex);
     m_tm_cache[hash] = translation;
 
-    fs::create_directories("models");
+    std::error_code ec;
+    fs::create_directories("models", ec);
     std::ofstream out("models/tm_cache.bin", std::ios::binary | std::ios::app);
     if (out.is_open()) {
         uint32_t len = static_cast<uint32_t>(translation.size());
@@ -124,12 +146,65 @@ void AIEngine::clear_tm_cache() {
     fs::remove("models/tm_cache.bin", ec);
 }
 
-bool AIEngine::load_model_async(const std::string& model_path, uint32_t requested_ctx) {
-    if (!m_ctx) {
-        if (!init()) return false;
+bool AIEngine::validate_gguf_file(const std::string& model_path, uint64_t& out_file_size, std::string& out_error) {
+    out_file_size = 0;
+    if (model_path.empty()) {
+        out_error = "Model path is empty.";
+        return false;
     }
 
-    if (m_is_loading_model.load() || is_generating()) {
+    fs::path p = utf8_to_fs_path(model_path);
+    std::error_code ec;
+    if (!fs::exists(p, ec) || ec) {
+        out_error = "Model file does not exist: " + model_path;
+        return false;
+    }
+    if (!fs::is_regular_file(p, ec) || ec) {
+        out_error = "Model path is not a regular file: " + model_path;
+        return false;
+    }
+
+    uintmax_t sz = fs::file_size(p, ec);
+    if (ec || sz == static_cast<uintmax_t>(-1) || sz < 24) {
+        out_error = "Model file is empty, unreadable, or truncated: " + model_path;
+        return false;
+    }
+
+    std::ifstream f(p, std::ios::in | std::ios::binary);
+    if (!f.is_open()) {
+        out_error = "Cannot open model file (check permissions): " + model_path;
+        return false;
+    }
+
+    uint8_t header[24] = { 0 };
+    if (!f.read(reinterpret_cast<char*>(header), sizeof(header))) {
+        out_error = "Failed to read GGUF header from: " + model_path;
+        return false;
+    }
+
+    if (header[0] != 'G' || header[1] != 'G' || header[2] != 'U' || header[3] != 'F') {
+        out_error = "Invalid GGUF file magic header: " + model_path;
+        return false;
+    }
+
+    uint32_t version = 0;
+    std::memcpy(&version, header + 4, sizeof(version));
+    if (version < 1 || version > 3) {
+        out_error = "Unsupported or corrupted GGUF version (" + std::to_string(version) + "): " + model_path;
+        return false;
+    }
+
+    out_file_size = static_cast<uint64_t>(sz);
+    return true;
+}
+
+bool AIEngine::load_model_async(const std::string& model_path, uint32_t requested_ctx) {
+    if (m_shutting_down.load(std::memory_order_acquire)) {
+        set_error("Engine is shutting down.");
+        return false;
+    }
+
+    if (m_is_loading_model.load(std::memory_order_acquire) || is_generating()) {
         set_error("Engine is currently busy loading a model or generating text.");
         return false;
     }
@@ -138,139 +213,173 @@ bool AIEngine::load_model_async(const std::string& model_path, uint32_t requeste
         m_model_load_thread.join();
     }
 
-    m_is_loading_model.store(true);
+    m_abort_load.store(false, std::memory_order_release);
+    m_is_loading_model.store(true, std::memory_order_release);
     clear_error();
 
     uint32_t safe_ctx = (requested_ctx == 0) ? 4096u : std::clamp(requested_ctx, 512u, 32768u);
 
-
     m_model_load_thread = std::thread([this, model_path, safe_ctx]() {
-        (void)infer_memory_clear(m_ctx);
+        struct LoadFlagGuard {
+            std::atomic<bool>& flag;
+            ~LoadFlagGuard() { flag.store(false, std::memory_order_release); }
+        } load_guard{ m_is_loading_model };
 
-        std::error_code ec_size;
-        uint64_t fsize = fs::file_size(model_path, ec_size);
-        m_model_size_bytes.store(fsize, std::memory_order_relaxed);
-
-        infer_model_params mparams = infer_model_default_params();
-        mparams.struct_size = sizeof(infer_model_params);
-        mparams.requested_ctx = safe_ctx;
-        mparams.n_gpu_layers = -1; // full gpu
-        mparams.use_mmap = true;
-        mparams.flash_attn = true;
-
-        mparams.kv_type_k = INFER_KV_TYPE_F16;
-        mparams.kv_type_v = INFER_KV_TYPE_F16;
-        mparams.allow_ctx_reduction = true;
-
-        bool success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
-        bool used_gpu = true;
-
-        // ATTEMPT 2 (Fallback 1): Partial GPU offload (27 layers)
-        if (!success) {
-            mparams.kv_type_k = INFER_KV_TYPE_F16;
-            mparams.kv_type_v = INFER_KV_TYPE_F16;
-            mparams.requested_ctx = 2048; // Reduce context size to save VRAM
-            mparams.n_gpu_layers = 27;    // Put 27 layers on GPU, rest on CPU
-
-            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
-            used_gpu = success;           // If this succeeds, the GPU is partially being used
-        }
-
-        // ATTEMPT 2 (Fallback  ): Partial GPU offload  
-        if (!success) {
-            mparams.kv_type_k = INFER_KV_TYPE_F16;
-            mparams.kv_type_v = INFER_KV_TYPE_F16;
-            mparams.requested_ctx = 2048; // Reduce context size to save VRAM
-            mparams.n_gpu_layers = 25;    // Put 27 layers on GPU, rest on CPU
-
-            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
-            used_gpu = success;           // If this succeeds, the GPU is partially being used
-        }
-
-        // ATTEMPT 2 (Fallback  ): Partial GPU offload  
-        if (!success) {
-            mparams.kv_type_k = INFER_KV_TYPE_F16;
-            mparams.kv_type_v = INFER_KV_TYPE_F16;
-            mparams.requested_ctx = 2048; // Reduce context size to save VRAM
-            mparams.n_gpu_layers = 18;    // Put 27 layers on GPU, rest on CPU
-
-            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
-            used_gpu = success;           // If this succeeds, the GPU is partially being used
-        }
-
-
-        // ATTEMPT 2 (Fallback  ): Partial GPU offload  
-        if (!success) {
-            mparams.kv_type_k = INFER_KV_TYPE_F16;
-            mparams.kv_type_v = INFER_KV_TYPE_F16;
-            mparams.requested_ctx = 2048;  
-            mparams.n_gpu_layers = 10;    
-
-            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
-            used_gpu = success;           // If this succeeds, the GPU is partially being used
-        }
-
-        //  Fallback 2  CPU only
-        if (!success) {
-            mparams.n_gpu_layers = 0;     
-            success = infer_load_model_ex(m_ctx, model_path.c_str(), &mparams);
-            used_gpu = false;           
-        }
-
-        if (success && mparams.n_gpu_layers == 0) {
-            used_gpu = false;
-        }
-
-        m_is_using_gpu.store(used_gpu, std::memory_order_relaxed);
-
-        if (!success) {
-            char err_buf[512] = { 0 };
-            infer_get_last_error(m_ctx, err_buf, sizeof(err_buf));
-            set_error(std::string("Model load failed: ") + err_buf);
-            m_model_loaded.store(false);
-        }
-        else {
-            infer_sampler_params params = infer_sampler_default_params();
-            params.struct_size = sizeof(infer_sampler_params);
-            params.temperature = 0.0f;
-            params.top_p = 1.0f;
-            params.top_k = 0;
-            params.min_p = 0.0f;
-            params.repeat_penalty = 1.05f;
-
-            if (!infer_set_sampler(m_ctx, &params)) {
-                char err_buf[512] = { 0 };
-                infer_get_last_error(m_ctx, err_buf, sizeof(err_buf));
-                set_error(std::string("Failed to set sampler: ") + err_buf);
-                m_model_loaded.store(false);
+        try {
+            uint64_t fsize = 0;
+            std::string val_err;
+            if (!validate_gguf_file(model_path, fsize, val_err)) {
+                set_error("Model load failed: " + val_err);
+                return;
             }
-            else {
-                static const char* const s_default_stops[] = {
-                    "<|im_end|>", "<|endoftext|>", "<|eot_id|>", "</s>", "<|end|>", "<|user|>"
-                };
-                (void)infer_set_stop_sequences(m_ctx, s_default_stops, sizeof(s_default_stops) / sizeof(s_default_stops[0]));
 
+            if (m_abort_load.load(std::memory_order_acquire) || m_shutting_down.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            if (!m_ctx.load(std::memory_order_acquire)) {
+                if (!init()) {
+                    return;
+                }
+            }
+
+            infer_ctx* ctx = m_ctx.load(std::memory_order_acquire);
+            if (!ctx || m_abort_load.load(std::memory_order_acquire) || m_shutting_down.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            (void)infer_memory_clear(ctx);
+
+            struct LoadAttempt {
+                uint32_t ctx_size;
+                int32_t  gpu_layers;
+            };
+            const LoadAttempt attempts[] = {
+                { safe_ctx, -1 },
+                { 2048u,    27 },
+                { 2048u,    25 },
+                { 2048u,    18 },
+                { 2048u,    10 },
+                { 2048u,     0 }
+            };
+
+            infer_model_params mparams = infer_model_default_params();
+            mparams.struct_size = sizeof(infer_model_params);
+            mparams.use_mmap = true;
+            mparams.flash_attn = true;
+            mparams.kv_type_k = INFER_KV_TYPE_F16;
+            mparams.kv_type_v = INFER_KV_TYPE_F16;
+            mparams.allow_ctx_reduction = true;
+
+            bool success = false;
+            bool used_gpu = false;
+            std::string last_load_err;
+
+            for (const auto& attempt : attempts) {
+                if (m_abort_load.load(std::memory_order_acquire) || m_shutting_down.load(std::memory_order_acquire)) {
+                    break;
+                }
+
+                mparams.requested_ctx = attempt.ctx_size;
+                mparams.n_gpu_layers = attempt.gpu_layers;
+
+                success = infer_load_model_ex(ctx, model_path.c_str(), &mparams);
+                if (success) {
+                    used_gpu = (attempt.gpu_layers != 0);
+                    break;
+                }
+
+                char err_buf[512] = { 0 };
+                infer_get_last_error(ctx, err_buf, sizeof(err_buf));
+                last_load_err = err_buf;
+
+                // Do not retry VRAM fallbacks for corrupted/unreadable GGUF files
+                if (last_load_err.find("Failed to open or read model file") != std::string::npos ||
+                    last_load_err.find("Failed to load model from path") != std::string::npos) {
+                    break;
+                }
+            }
+
+            if (m_abort_load.load(std::memory_order_acquire) || m_shutting_down.load(std::memory_order_acquire)) {
                 infer_model_info info{};
                 info.struct_size = sizeof(infer_model_info);
-                if (infer_get_model_info(m_ctx, &info) && info.n_ctx_active > 0) {
-                    m_active_ctx.store(info.n_ctx_active, std::memory_order_relaxed);
+                m_model_loaded.store(infer_get_model_info(ctx, &info), std::memory_order_release);
+                return;
+            }
+
+            if (!success) {
+                set_error(std::string("Model load failed: ") + last_load_err);
+                // Reconcile m_model_loaded with actual infer_ctx state (libinfer may have preserved/restored the previous model)
+                infer_model_info info{};
+                info.struct_size = sizeof(infer_model_info);
+                bool still_has_model = infer_get_model_info(ctx, &info);
+                m_model_loaded.store(still_has_model, std::memory_order_release);
+                if (!still_has_model) {
+                    m_model_size_bytes.store(0, std::memory_order_relaxed);
                 }
-                {
-                    std::lock_guard<std::mutex> lock(m_output_mutex);
-                    m_model_path = model_path;
-                    m_is_qwen3.store(model_path.find("Qwen3") != std::string::npos);
+            }
+            else {
+                m_model_size_bytes.store(fsize, std::memory_order_relaxed);
+                m_is_using_gpu.store(used_gpu, std::memory_order_relaxed);
+
+                infer_sampler_params params = infer_sampler_default_params();
+                params.struct_size = sizeof(infer_sampler_params);
+                params.temperature = 0.0f;
+                params.top_p = 1.0f;
+                params.top_k = 0;
+                params.min_p = 0.0f;
+                params.repeat_penalty = 1.05f;
+
+                if (!infer_set_sampler(ctx, &params)) {
+                    char err_buf[512] = { 0 };
+                    infer_get_last_error(ctx, err_buf, sizeof(err_buf));
+                    set_error(std::string("Failed to set sampler: ") + err_buf);
+                    (void)infer_unload_model(ctx);
+                    m_model_loaded.store(false, std::memory_order_release);
+                    m_model_size_bytes.store(0, std::memory_order_relaxed);
                 }
-                m_model_loaded.store(true);
+                else {
+                    static const char* const s_default_stops[] = {
+                        "<|im_end|>", "<|endoftext|>", "<|eot_id|>", "</s>", "<|end|>", "<|user|>"
+                    };
+                    (void)infer_set_stop_sequences(ctx, s_default_stops, sizeof(s_default_stops) / sizeof(s_default_stops[0]));
+
+                    infer_model_info info{};
+                    info.struct_size = sizeof(infer_model_info);
+                    if (infer_get_model_info(ctx, &info) && info.n_ctx_active > 0) {
+                        m_active_ctx.store(info.n_ctx_active, std::memory_order_relaxed);
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(m_output_mutex);
+                        m_model_path = model_path;
+                        m_is_qwen3.store(model_path.find("Qwen3") != std::string::npos, std::memory_order_release);
+                    }
+                    m_model_loaded.store(true, std::memory_order_release);
+                }
             }
         }
-        m_is_loading_model.store(false);
+        catch (const std::exception& ex) {
+            set_error(std::string("Model load exception: ") + ex.what());
+            infer_ctx* ctx = m_ctx.load(std::memory_order_acquire);
+            infer_model_info info{};
+            info.struct_size = sizeof(infer_model_info);
+            m_model_loaded.store(ctx ? infer_get_model_info(ctx, &info) : false, std::memory_order_release);
+        }
+        catch (...) {
+            set_error("Unknown exception during model loading.");
+            infer_ctx* ctx = m_ctx.load(std::memory_order_acquire);
+            infer_model_info info{};
+            info.struct_size = sizeof(infer_model_info);
+            m_model_loaded.store(ctx ? infer_get_model_info(ctx, &info) : false, std::memory_order_release);
+        }
         });
 
     return true;
 }
 
 void AIEngine::configure_task_sampler(const AIEngineOptions& opts) {
-    if (!m_ctx) return;
+    infer_ctx* ctx = m_ctx.load(std::memory_order_acquire);
+    if (!ctx) return;
 
     infer_sampler_params params = infer_sampler_default_params();
     params.struct_size = sizeof(infer_sampler_params);
@@ -290,7 +399,7 @@ void AIEngine::configure_task_sampler(const AIEngineOptions& opts) {
         params.repeat_penalty = 1.08f;
     }
 
-    (void)infer_set_sampler(m_ctx, &params);
+    (void)infer_set_sampler(ctx, &params);
 }
 
 std::vector<std::pair<std::string, std::string>> AIEngine::parse_glossary(const std::string& raw_glossary) {
@@ -621,7 +730,13 @@ std::vector<std::string> AIEngine::split_into_chunks(const std::string& text, si
 
 
 bool AIEngine::start_task(const std::string& input_text, const AIEngineOptions& opts) {
-    if (!m_ctx || !m_model_loaded.load() || m_is_loading_model.load()) {
+    if (m_shutting_down.load(std::memory_order_acquire)) {
+        set_error("Engine is shutting down.");
+        return false;
+    }
+
+    infer_ctx* ctx = m_ctx.load(std::memory_order_acquire);
+    if (!ctx || !m_model_loaded.load(std::memory_order_acquire) || m_is_loading_model.load(std::memory_order_acquire)) {
         set_error("No model loaded or model is currently loading.");
         return false;
     }
@@ -640,8 +755,11 @@ bool AIEngine::start_task(const std::string& input_text, const AIEngineOptions& 
         m_task_thread.join();
     }
 
+    clear_error();
     clear_output_text();
-    m_is_task_running.store(true);
+    m_cancel_requested.store(false, std::memory_order_release);
+    m_stop_hit_in_callback.store(false, std::memory_order_release);
+    m_is_task_running.store(true, std::memory_order_release);
     m_task_thread = std::thread(&AIEngine::task_thread_proc, this, input_text, opts);
     return true;
 }
@@ -685,378 +803,426 @@ bool AIEngine::start_auto_correct_task(
 }
 
 void AIEngine::task_thread_proc(std::string input_text, AIEngineOptions opts) {
-    configure_task_sampler(opts);
+    struct TaskRunGuard {
+        std::atomic<bool>& flag;
+        ~TaskRunGuard() { flag.store(false, std::memory_order_release); }
+    } run_guard{ m_is_task_running };
 
-    // =========================================================
-    // CHAT & CODE MODE: Full Input Single-Turn Prompting
-    // =========================================================
-    if (opts.mode == AITaskMode::Chat || opts.mode == AITaskMode::CodeAssistant) {
-        std::string sys_prompt = build_system_prompt(opts, input_text, {});
-
-        std::vector<infer_chat_msg> msgs;
-        msgs.reserve(opts.chat_history.size() + 2);
-
-        // 1. System Prompt
-        infer_chat_msg sys_msg{};
-        sys_msg.role = "system";
-        sys_msg.content = sys_prompt.c_str();
-        msgs.push_back(sys_msg);
-
-        // 2. Chat History (Memory)
-        if (opts.mode == AITaskMode::Chat) {
-            for (const auto& msg : opts.chat_history) {
-                infer_chat_msg m{};
-                m.role = msg.role.c_str();
-                m.content = msg.content.c_str();
-                msgs.push_back(m);
-            }
-        }
-
-        // 3. User Input / Code Prompt
-        infer_chat_msg user_msg{};
-        user_msg.role = "user";
-        user_msg.content = input_text.c_str();
-        msgs.push_back(user_msg);
-
-        uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
-        int32_t effective_max_tokens = std::clamp<int32_t>(
-            opts.max_tokens > 0 ? opts.max_tokens : static_cast<int32_t>(active_ctx / 2),
-            2048, 8192
-        );
-
-
-        if (m_is_qwen3.load() && opts.qwen3_deep_think) {
-            effective_max_tokens = std::max(effective_max_tokens, 4096);
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(m_output_mutex);
-            m_current_chunk_buffer.clear();
-        }
-
-        bool dispatched = infer_generate_chat_v2(
-            m_ctx, msgs.data(), msgs.size(), effective_max_tokens, AIEngine::stream_callback_v2, this
-        );
-
-        if (!dispatched) {
-            char err_buf[512] = { 0 };
-            infer_get_last_error(m_ctx, err_buf, sizeof(err_buf));
-            set_error(std::string("Failed to dispatch task: ") + err_buf);
-        }
-
-        m_is_task_running.store(false);
-        return;
-    }
-
-    // =========================================================
-    // EPUB CONTINUOUS EBOOK TRANSLATION
-    // =========================================================
-    if (opts.is_epub_task) {
-        std::string temp_dir, epub_err;
-        std::vector<std::string> rel_html_files;
-        if (!EpubProcessor::prepare_epub_extraction(opts.epub_input_path, temp_dir, rel_html_files, epub_err)) {
-            set_error(epub_err);
-            m_is_task_running.store(false);
+    try {
+        infer_ctx* ctx = m_ctx.load(std::memory_order_acquire);
+        if (!ctx || m_cancel_requested.load(std::memory_order_acquire) || m_shutting_down.load(std::memory_order_acquire)) {
             return;
         }
 
-        struct TempCleanupGuard {
-            std::string path;
-            ~TempCleanupGuard() {
-                if (!path.empty()) {
-                    std::error_code ec;
-                    fs::remove_all(path, ec);
+        configure_task_sampler(opts);
+
+        // =========================================================
+        // CHAT & CODE MODE: Full Input Single-Turn Prompting
+        // =========================================================
+        if (opts.mode == AITaskMode::Chat || opts.mode == AITaskMode::CodeAssistant) {
+            if (m_cancel_requested.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            std::string sys_prompt = build_system_prompt(opts, input_text, {});
+
+            std::vector<infer_chat_msg> msgs;
+            msgs.reserve(opts.chat_history.size() + 2);
+
+            // 1. System Prompt
+            infer_chat_msg sys_msg{};
+            sys_msg.role = "system";
+            sys_msg.content = sys_prompt.c_str();
+            msgs.push_back(sys_msg);
+
+            // 2. Chat History (Memory)
+            if (opts.mode == AITaskMode::Chat) {
+                for (const auto& msg : opts.chat_history) {
+                    infer_chat_msg m{};
+                    m.role = msg.role.c_str();
+                    m.content = msg.content.c_str();
+                    msgs.push_back(m);
                 }
             }
-        } temp_guard{ temp_dir };
+
+            // 3. User Input / Code Prompt
+            infer_chat_msg user_msg{};
+            user_msg.role = "user";
+            user_msg.content = input_text.c_str();
+            msgs.push_back(user_msg);
+
+            uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
+            int32_t effective_max_tokens = std::clamp<int32_t>(
+                opts.max_tokens > 0 ? opts.max_tokens : static_cast<int32_t>(active_ctx / 2),
+                2048, 8192
+            );
+
+            if (m_is_qwen3.load() && opts.qwen3_deep_think) {
+                effective_max_tokens = std::max(effective_max_tokens, 4096);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(m_output_mutex);
+                m_current_chunk_buffer.clear();
+            }
+
+            if (m_cancel_requested.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            m_stop_hit_in_callback.store(false, std::memory_order_release);
+            bool dispatched = infer_generate_chat_v2(
+                ctx, msgs.data(), msgs.size(), effective_max_tokens, AIEngine::stream_callback_v2, this
+            );
+
+            if (!dispatched &&
+                !m_stop_hit_in_callback.load(std::memory_order_acquire) &&
+                !m_cancel_requested.load(std::memory_order_acquire)) {
+                char err_buf[512] = { 0 };
+                infer_get_last_error(ctx, err_buf, sizeof(err_buf));
+                set_error(std::string("Failed to dispatch task: ") + err_buf);
+            }
+
+            return;
+        }
+
+        // =========================================================
+        // EPUB CONTINUOUS EBOOK TRANSLATION
+        // =========================================================
+        if (opts.is_epub_task) {
+            if (m_cancel_requested.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            std::string temp_dir, epub_err;
+            std::vector<std::string> rel_html_files;
+            if (!EpubProcessor::prepare_epub_extraction(opts.epub_input_path, temp_dir, rel_html_files, epub_err)) {
+                set_error(epub_err);
+                return;
+            }
+
+            struct TempCleanupGuard {
+                std::string path;
+                ~TempCleanupGuard() {
+                    if (!path.empty()) {
+                        std::error_code ec;
+                        fs::remove_all(utf8_to_fs_path(path), ec);
+                    }
+                }
+            } temp_guard{ temp_dir };
+
+            {
+                std::lock_guard<std::mutex> lock(m_chunk_mutex);
+                m_current_chunk = 0;
+                m_total_chunks = rel_html_files.size();
+                m_tm_cache_hits = 0;
+            }
+
+            std::string loaded_model = get_loaded_model_path();
+            std::string cumulative_translated_summary;
+            bool epub_had_error = false;
+
+            for (size_t file_idx = 0; file_idx < rel_html_files.size(); ++file_idx) {
+                if (m_cancel_requested.load(std::memory_order_acquire)) break;
+
+                {
+                    std::lock_guard<std::mutex> lock(m_chunk_mutex);
+                    m_current_chunk = file_idx + 1;
+                }
+
+                fs::path full_path = utf8_to_fs_path(temp_dir) / utf8_to_fs_path(rel_html_files[file_idx]);
+                std::string full_path_utf8 = fs_path_to_utf8(full_path);
+                std::vector<EpubSegment> segments;
+                std::string skeleton_xml, prompt_text;
+
+                if (!EpubProcessor::extract_single_file_segments(full_path_utf8, segments, skeleton_xml, prompt_text)) {
+                    continue;
+                }
+
+                auto glossary = parse_glossary(opts.glossary_raw);
+
+                uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
+                size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 60) / 100, 1200, 2800);
+                int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 4096));
+
+                std::vector<std::string> file_chunks = split_into_chunks(prompt_text, auto_chunk_chars);
+                std::string file_translated_accumulator;
+
+                for (size_t c_idx = 0; c_idx < file_chunks.size(); ++c_idx) {
+                    if (m_cancel_requested.load(std::memory_order_acquire)) break;
+
+                    std::string epub_marker;
+                    std::string pure_text_for_ai = file_chunks[c_idx];
+                    bool is_single_epub_seg = extract_single_epub_marker(file_chunks[c_idx], epub_marker, pure_text_for_ai);
+
+                    std::string sys_prompt = build_system_prompt(opts, pure_text_for_ai, glossary);
+                    uint64_t chunk_hash = fnv1a_64(loaded_model + "|" + sys_prompt + "|" + pure_text_for_ai);
+
+                    std::string completed_chunk;
+                    if (opts.enable_tm_cache && !opts.is_retry) {
+                        bool cache_hit = false;
+                        {
+                            std::lock_guard<std::mutex> lock(m_tm_mutex);
+                            auto it = m_tm_cache.find(chunk_hash);
+                            if (it != m_tm_cache.end()) {
+                                completed_chunk = it->second;
+                                cache_hit = true;
+                            }
+                        }
+                        if (cache_hit) {
+                            std::lock_guard<std::mutex> chunk_lock(m_chunk_mutex);
+                            m_tm_cache_hits++;
+                        }
+                    }
+
+                    if (completed_chunk.empty()) {
+                        {
+                            std::lock_guard<std::mutex> lock(m_output_mutex);
+                            m_current_chunk_buffer.clear();
+                        }
+
+                        infer_chat_msg msgs[2]{};
+                        msgs[0].role = "system";
+                        msgs[0].content = sys_prompt.c_str();
+                        msgs[1].role = "user";
+                        msgs[1].content = pure_text_for_ai.c_str();
+
+                        int32_t effective_max_tokens = (m_is_qwen3.load() && opts.qwen3_deep_think)
+                            ? std::max(auto_max_tokens, 4096)
+                            : auto_max_tokens;
+
+                        if (m_cancel_requested.load(std::memory_order_acquire)) break;
+
+                        m_stop_hit_in_callback.store(false, std::memory_order_release);
+                        bool dispatched = infer_generate_chat_v2(
+                            ctx, msgs, 2, effective_max_tokens, AIEngine::stream_callback_v2, this
+                        );
+
+                        if (!dispatched &&
+                            !m_stop_hit_in_callback.load(std::memory_order_acquire)) {
+                            if (!m_cancel_requested.load(std::memory_order_acquire)) {
+                                char err_buf[512] = { 0 };
+                                infer_get_last_error(ctx, err_buf, sizeof(err_buf));
+                                set_error(std::string("Failed to dispatch chat task: ") + err_buf);
+                                epub_had_error = true;
+                            }
+                            break;
+                        }
+
+                        {
+                            std::lock_guard<std::mutex> lock(m_output_mutex);
+                            completed_chunk = sanitize_thinking_output(m_current_chunk_buffer);
+                        }
+
+                        if (!m_cancel_requested.load(std::memory_order_acquire) && !completed_chunk.empty() && opts.enable_tm_cache) {
+                            save_tm_entry_to_disk(chunk_hash, completed_chunk);
+                        }
+                    }
+
+                    if (is_single_epub_seg) {
+                        std::string chosen = completed_chunk.empty() ? pure_text_for_ai : completed_chunk;
+                        file_translated_accumulator += epub_marker + " " + chosen + "\n\n";
+                    }
+                    else {
+                        file_translated_accumulator += completed_chunk + "\n\n";
+                    }
+                }
+
+                if (m_cancel_requested.load(std::memory_order_acquire) || epub_had_error) break;
+
+                auto file_translated_map = EpubProcessor::parse_translated_markers(file_translated_accumulator, segments.size());
+                EpubProcessor::write_single_file_translation(full_path_utf8, skeleton_xml, segments, file_translated_map);
+
+                std::string log_entry = "Completed " + rel_html_files[file_idx] + " (" + std::to_string(file_idx + 1) + "/" + std::to_string(rel_html_files.size()) + " files)\n";
+                cumulative_translated_summary += log_entry;
+
+                {
+                    std::lock_guard<std::mutex> lock(m_output_mutex);
+                    m_output_buffer = cumulative_translated_summary;
+                    m_sanitized_cache = cumulative_translated_summary;
+                    m_output_dirty = true;
+                    m_output_revision++;
+                }
+            }
+
+            if (!m_cancel_requested.load(std::memory_order_acquire) && !epub_had_error) {
+                std::string final_repack_err;
+                if (!EpubProcessor::finalize_epub_repack(temp_dir, opts.epub_output_path, final_repack_err)) {
+                    set_error("EPUB repack failed: " + final_repack_err);
+                }
+            }
+
+            return;
+        }
+
+        // Standard task execution...
+        uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
+        size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 60) / 100, 1200, 2800);
+        int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 4096));
+
+        std::vector<std::string> chunks = split_into_chunks(input_text, auto_chunk_chars);
+        auto glossary = parse_glossary(opts.glossary_raw);
 
         {
             std::lock_guard<std::mutex> lock(m_chunk_mutex);
             m_current_chunk = 0;
-            m_total_chunks = rel_html_files.size();
+            m_total_chunks = chunks.size();
             m_tm_cache_hits = 0;
         }
 
+        std::string prev_user_tail;
+        std::string prev_assistant_tail;
         std::string loaded_model = get_loaded_model_path();
-        std::string cumulative_translated_summary;
 
-        for (size_t file_idx = 0; file_idx < rel_html_files.size(); ++file_idx) {
-            if (!m_is_task_running.load()) break;
+        std::string clean_epub_accumulator;
+        bool any_epub_seg = false;
+
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            if (m_cancel_requested.load(std::memory_order_acquire)) break;
 
             {
                 std::lock_guard<std::mutex> lock(m_chunk_mutex);
-                m_current_chunk = file_idx + 1;
+                m_current_chunk = i + 1;
             }
 
-            fs::path full_path = fs::path(temp_dir) / fs::u8path(rel_html_files[file_idx]);
-            std::vector<EpubSegment> segments;
-            std::string skeleton_xml, prompt_text;
+            std::string epub_marker;
+            std::string pure_text_for_ai = chunks[i];
+            bool is_single_epub_seg = extract_single_epub_marker(chunks[i], epub_marker, pure_text_for_ai);
+            if (is_single_epub_seg) any_epub_seg = true;
 
-            if (!EpubProcessor::extract_single_file_segments(full_path.string(), segments, skeleton_xml, prompt_text)) {
-                continue;
-            }
+            std::string sys_prompt = build_system_prompt(opts, pure_text_for_ai, glossary);
+            uint64_t chunk_hash = fnv1a_64(loaded_model + "|" + sys_prompt + "|" + pure_text_for_ai);
 
-            auto glossary = parse_glossary(opts.glossary_raw);
-
-            uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
-            size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 60) / 100, 1200, 2800);
-            int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 4096));
-
-            std::vector<std::string> file_chunks = split_into_chunks(prompt_text, auto_chunk_chars);
-            std::string file_translated_accumulator;
-
-            for (size_t c_idx = 0; c_idx < file_chunks.size(); ++c_idx) {
-                if (!m_is_task_running.load()) break;
-
-                std::string epub_marker;
-                std::string pure_text_for_ai = file_chunks[c_idx];
-                bool is_single_epub_seg = extract_single_epub_marker(file_chunks[c_idx], epub_marker, pure_text_for_ai);
-
-                std::string sys_prompt = build_system_prompt(opts, pure_text_for_ai, glossary);
-                uint64_t chunk_hash = fnv1a_64(loaded_model + "|" + sys_prompt + "|" + pure_text_for_ai);
-
-                std::string completed_chunk;
-                if (opts.enable_tm_cache && !opts.is_retry) {
+            if (opts.enable_tm_cache && !opts.is_retry) {
+                std::string cached_translation;
+                {
                     std::lock_guard<std::mutex> lock(m_tm_mutex);
                     auto it = m_tm_cache.find(chunk_hash);
                     if (it != m_tm_cache.end()) {
-                        completed_chunk = it->second;
+                        cached_translation = it->second;
+                    }
+                }
+                if (!cached_translation.empty()) {
+                    {
+                        std::lock_guard<std::mutex> lock(m_output_mutex);
+                        if (is_single_epub_seg) {
+                            std::string entry = epub_marker + " " + cached_translation + "\n\n";
+                            clean_epub_accumulator += entry;
+                            m_output_buffer = clean_epub_accumulator;
+                        }
+                        else {
+                            m_output_buffer.append(cached_translation);
+                            if (i + 1 < chunks.size()) m_output_buffer.append("\n\n");
+                        }
+                        m_output_dirty = true;
+                        m_output_revision++;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(m_chunk_mutex);
                         m_tm_cache_hits++;
                     }
-                }
-
-                if (completed_chunk.empty()) {
-                    {
-                        std::lock_guard<std::mutex> lock(m_output_mutex);
-                        m_current_chunk_buffer.clear();
-                    }
-
-                    infer_chat_msg msgs[2]{};
-                    msgs[0].role = "system";
-                    msgs[0].content = sys_prompt.c_str();
-                    msgs[1].role = "user";
-                    msgs[1].content = pure_text_for_ai.c_str();
-
-                    int32_t effective_max_tokens = (m_is_qwen3.load() && opts.qwen3_deep_think)
-                        ? std::max(auto_max_tokens, 4096)
-                        : auto_max_tokens;
-
-                    bool dispatched = infer_generate_chat_v2(
-                        m_ctx, msgs, 2, effective_max_tokens, AIEngine::stream_callback_v2, this
-                    );
-
-                    if (!dispatched) {
-                        char err_buf[512] = { 0 };
-                        infer_get_last_error(m_ctx, err_buf, sizeof(err_buf));
-                        set_error(std::string("Failed to dispatch chat task: ") + err_buf);
-                        break;
-                    }
-
-                    {
-                        std::lock_guard<std::mutex> lock(m_output_mutex);
-                        completed_chunk = sanitize_thinking_output(m_current_chunk_buffer);
-                    }
-
-                    if (m_is_task_running.load() && !completed_chunk.empty() && opts.enable_tm_cache) {
-                        save_tm_entry_to_disk(chunk_hash, completed_chunk);
-                    }
-                }
-
-                if (is_single_epub_seg) {
-                    std::string chosen = completed_chunk.empty() ? pure_text_for_ai : completed_chunk;
-                    file_translated_accumulator += epub_marker + " " + chosen + "\n\n";
-                }
-                else {
-                    file_translated_accumulator += completed_chunk + "\n\n";
+                    prev_user_tail = pure_text_for_ai.size() > 300 ? pure_text_for_ai.substr(pure_text_for_ai.size() - 300) : pure_text_for_ai;
+                    prev_assistant_tail = cached_translation.size() > 300 ? cached_translation.substr(cached_translation.size() - 300) : cached_translation;
+                    continue;
                 }
             }
-
-            auto file_translated_map = EpubProcessor::parse_translated_markers(file_translated_accumulator, segments.size());
-            EpubProcessor::write_single_file_translation(full_path.string(), skeleton_xml, segments, file_translated_map);
-
-            std::string log_entry = "Completed " + rel_html_files[file_idx] + " (" + std::to_string(file_idx + 1) + "/" + std::to_string(rel_html_files.size()) + " files)\n";
-            cumulative_translated_summary += log_entry;
 
             {
                 std::lock_guard<std::mutex> lock(m_output_mutex);
-                m_output_buffer = cumulative_translated_summary;
-                m_sanitized_cache = cumulative_translated_summary;
-                m_output_dirty = true;
-                m_output_revision++;
+                m_current_chunk_buffer.clear();
             }
-        }
 
-        if (m_is_task_running.load()) {
-            std::string final_repack_err;
-            if (!EpubProcessor::finalize_epub_repack(temp_dir, opts.epub_output_path, final_repack_err)) {
-                set_error("EPUB repack failed: " + final_repack_err);
+            infer_chat_msg msgs[4]{};
+            size_t msg_count = 0;
+
+            msgs[msg_count].role = "system";
+            msgs[msg_count].content = sys_prompt.c_str();
+            msg_count++;
+
+            if (opts.enable_continuity && i > 0 && !prev_user_tail.empty() && !prev_assistant_tail.empty()) {
+                msgs[msg_count].role = "user";
+                msgs[msg_count].content = prev_user_tail.c_str();
+                msg_count++;
+
+                msgs[msg_count].role = "assistant";
+                msgs[msg_count].content = prev_assistant_tail.c_str();
+                msg_count++;
             }
-        }
 
-        m_is_task_running.store(false);
-        return;
-    }
+            msgs[msg_count].role = "user";
+            msgs[msg_count].content = pure_text_for_ai.c_str();
+            msg_count++;
 
- 
-   // Standard task execution...
-    uint32_t active_ctx = m_active_ctx.load(std::memory_order_relaxed);
-    size_t auto_chunk_chars = std::clamp<size_t>((static_cast<size_t>(active_ctx) * 60) / 100, 1200, 2800);
-    int32_t auto_max_tokens = static_cast<int32_t>(std::clamp<uint32_t>(active_ctx / 2, 1024, 4096)); 
+            int32_t effective_max_tokens = (m_is_qwen3.load() && opts.qwen3_deep_think)
+                ? std::max(auto_max_tokens, 4096)
+                : auto_max_tokens;
 
-    std::vector<std::string> chunks = split_into_chunks(input_text, auto_chunk_chars);
-    auto glossary = parse_glossary(opts.glossary_raw);
+            if (m_cancel_requested.load(std::memory_order_acquire)) break;
 
-    {
-        std::lock_guard<std::mutex> lock(m_chunk_mutex);
-        m_current_chunk = 0;
-        m_total_chunks = chunks.size();
-        m_tm_cache_hits = 0;
-    }
+            m_stop_hit_in_callback.store(false, std::memory_order_release);
+            bool dispatched = infer_generate_chat_v2(
+                ctx, msgs, msg_count, effective_max_tokens, AIEngine::stream_callback_v2, this
+            );
 
-    std::string prev_user_tail;
-    std::string prev_assistant_tail;
-    std::string loaded_model = get_loaded_model_path();
-
-    std::string clean_epub_accumulator;
-    bool any_epub_seg = false;
-
-    for (size_t i = 0; i < chunks.size(); ++i) {
-        if (!m_is_task_running.load()) break;
-
-        {
-            std::lock_guard<std::mutex> lock(m_chunk_mutex);
-            m_current_chunk = i + 1;
-        }
-
-        std::string epub_marker;
-        std::string pure_text_for_ai = chunks[i];
-        bool is_single_epub_seg = extract_single_epub_marker(chunks[i], epub_marker, pure_text_for_ai);
-        if (is_single_epub_seg) any_epub_seg = true;
-
-        std::string sys_prompt = build_system_prompt(opts, pure_text_for_ai, glossary);
-        uint64_t chunk_hash = fnv1a_64(loaded_model + "|" + sys_prompt + "|" + pure_text_for_ai);
-
-        if (opts.enable_tm_cache && !opts.is_retry) {
-            std::string cached_translation;
-            {
-                std::lock_guard<std::mutex> lock(m_tm_mutex);
-                auto it = m_tm_cache.find(chunk_hash);
-                if (it != m_tm_cache.end()) {
-                    cached_translation = it->second;
+            if (!dispatched &&
+                !m_stop_hit_in_callback.load(std::memory_order_acquire)) {
+                if (!m_cancel_requested.load(std::memory_order_acquire)) {
+                    char err_buf[512] = { 0 };
+                    infer_get_last_error(ctx, err_buf, sizeof(err_buf));
+                    set_error(std::string("Failed to dispatch chat task: ") + err_buf);
                 }
+                break;
             }
-            if (!cached_translation.empty()) {
-                {
-                    std::lock_guard<std::mutex> lock(m_output_mutex);
-                    if (is_single_epub_seg) {
-                        std::string entry = epub_marker + " " + cached_translation + "\n\n";
-                        clean_epub_accumulator += entry;
-                        m_output_buffer = clean_epub_accumulator;
-                    }
-                    else {
-                        m_output_buffer.append(cached_translation);
-                        if (i + 1 < chunks.size()) m_output_buffer.append("\n\n");
-                    }
+
+            std::string completed_chunk;
+            {
+                std::lock_guard<std::mutex> lock(m_output_mutex);
+                completed_chunk = sanitize_thinking_output(m_current_chunk_buffer);
+                if (is_single_epub_seg) {
+                    std::string chosen = completed_chunk.empty() ? pure_text_for_ai : completed_chunk;
+                    clean_epub_accumulator += epub_marker + " " + chosen + "\n\n";
+                    m_output_buffer = clean_epub_accumulator;
                     m_output_dirty = true;
                     m_output_revision++;
                 }
-                {
-                    std::lock_guard<std::mutex> lock(m_chunk_mutex);
-                    m_tm_cache_hits++;
+                else if (i + 1 < chunks.size()) {
+                    m_output_buffer.append("\n\n");
+                    m_output_dirty = true;
+                    m_output_revision++;
+                }
+            }
+
+            if (!m_cancel_requested.load(std::memory_order_acquire) && !completed_chunk.empty()) {
+                if (opts.enable_tm_cache) {
+                    save_tm_entry_to_disk(chunk_hash, completed_chunk);
                 }
                 prev_user_tail = pure_text_for_ai.size() > 300 ? pure_text_for_ai.substr(pure_text_for_ai.size() - 300) : pure_text_for_ai;
-                prev_assistant_tail = cached_translation.size() > 300 ? cached_translation.substr(cached_translation.size() - 300) : cached_translation;
-                continue;
+                prev_assistant_tail = completed_chunk.size() > 300 ? completed_chunk.substr(completed_chunk.size() - 300) : completed_chunk;
             }
         }
 
-        {
+        if (any_epub_seg && !m_cancel_requested.load(std::memory_order_acquire)) {
             std::lock_guard<std::mutex> lock(m_output_mutex);
-            m_current_chunk_buffer.clear();
-        }
-
-        infer_chat_msg msgs[4]{};
-        size_t msg_count = 0;
-
-        msgs[msg_count].role = "system";
-        msgs[msg_count].content = sys_prompt.c_str();
-        msg_count++;
-
-        if (opts.enable_continuity && i > 0 && !prev_user_tail.empty() && !prev_assistant_tail.empty()) {
-            msgs[msg_count].role = "user";
-            msgs[msg_count].content = prev_user_tail.c_str();
-            msg_count++;
-
-            msgs[msg_count].role = "assistant";
-            msgs[msg_count].content = prev_assistant_tail.c_str();
-            msg_count++;
-        }
-
-        msgs[msg_count].role = "user";
-        msgs[msg_count].content = pure_text_for_ai.c_str();
-        msg_count++;
-
-        int32_t effective_max_tokens = (m_is_qwen3.load() && opts.qwen3_deep_think)
-            ? std::max(auto_max_tokens, 4096)
-            : auto_max_tokens;
-
-        bool dispatched = infer_generate_chat_v2(
-            m_ctx, msgs, msg_count, effective_max_tokens, AIEngine::stream_callback_v2, this
-        );
-
-        if (!dispatched) {
-            char err_buf[512] = { 0 };
-            infer_get_last_error(m_ctx, err_buf, sizeof(err_buf));
-            set_error(std::string("Failed to dispatch chat task: ") + err_buf);
-            break;
-        }
-
-        std::string completed_chunk;
-        {
-            std::lock_guard<std::mutex> lock(m_output_mutex);
-            completed_chunk = sanitize_thinking_output(m_current_chunk_buffer);
-            if (is_single_epub_seg) {
-                std::string chosen = completed_chunk.empty() ? pure_text_for_ai : completed_chunk;
-                clean_epub_accumulator += epub_marker + " " + chosen + "\n\n";
-                m_output_buffer = clean_epub_accumulator;
-                m_output_dirty = true;
-                m_output_revision++;
-            }
-            else if (i + 1 < chunks.size()) {
-                m_output_buffer.append("\n\n");
-                m_output_dirty = true;
-                m_output_revision++;
-            }
-        }
-
-        if (m_is_task_running.load() && !completed_chunk.empty()) {
-            if (opts.enable_tm_cache) {
-                save_tm_entry_to_disk(chunk_hash, completed_chunk);
-            }
-            prev_user_tail = pure_text_for_ai.size() > 300 ? pure_text_for_ai.substr(pure_text_for_ai.size() - 300) : pure_text_for_ai;
-            prev_assistant_tail = completed_chunk.size() > 300 ? completed_chunk.substr(completed_chunk.size() - 300) : completed_chunk;
+            m_output_buffer = clean_epub_accumulator;
+            m_sanitized_cache = clean_epub_accumulator;
+            m_output_dirty = true;
+            m_output_revision++;
         }
     }
-
-    if (any_epub_seg) {
-        std::lock_guard<std::mutex> lock(m_output_mutex);
-        m_output_buffer = clean_epub_accumulator;
-        m_sanitized_cache = clean_epub_accumulator;
-        m_output_dirty = true;
-        m_output_revision++;
+    catch (const std::exception& ex) {
+        set_error(std::string("Inference worker exception: ") + ex.what());
     }
-
-    m_is_task_running.store(false);
+    catch (...) {
+        set_error("Unknown exception in inference worker.");
+    }
 }
-
-
-
 
 bool AIEngine::stream_callback_v2(const char* piece, size_t len, void* user_data) {
     if (!piece || len == 0 || !user_data) return true;
     AIEngine* engine = static_cast<AIEngine*>(user_data);
 
-    if (!engine->m_is_task_running.load(std::memory_order_relaxed)) {
+    if (engine->m_cancel_requested.load(std::memory_order_acquire) ||
+        engine->m_shutting_down.load(std::memory_order_acquire)) {
         return false;
     }
 
@@ -1064,6 +1230,7 @@ bool AIEngine::stream_callback_v2(const char* piece, size_t len, void* user_data
 
     if (slice == "<|im_end|>" || slice == "<|eot_id|>" ||
         slice == "<|endoftext|>" || slice == "</s>" || slice == "<|end|>") {
+        engine->m_stop_hit_in_callback.store(true, std::memory_order_release);
         return false;
     }
 
@@ -1075,20 +1242,19 @@ bool AIEngine::stream_callback_v2(const char* piece, size_t len, void* user_data
         "<|im_end|>", "<|eot_id|>", "<|endoftext|>", "</s>", "<|end|>"
     };
     for (const auto& stop : s_stops) {
-        if (engine->m_current_chunk_buffer.size() >= stop.size()) {
-            size_t pos = engine->m_current_chunk_buffer.rfind(stop);
-            if (pos != std::string::npos && pos + stop.size() == engine->m_current_chunk_buffer.size()) {
-                engine->m_current_chunk_buffer.erase(pos);
-                if (engine->m_output_buffer.size() >= stop.size()) {
-                    size_t opos = engine->m_output_buffer.rfind(stop);
-                    if (opos != std::string::npos && opos + stop.size() == engine->m_output_buffer.size()) {
-                        engine->m_output_buffer.erase(opos);
-                    }
-                }
-                engine->m_output_dirty = true;
-                engine->m_output_revision++;
-                return false;
+        if (engine->m_current_chunk_buffer.size() >= stop.size() &&
+            engine->m_current_chunk_buffer.compare(
+                engine->m_current_chunk_buffer.size() - stop.size(), stop.size(), stop) == 0) {
+            engine->m_current_chunk_buffer.erase(engine->m_current_chunk_buffer.size() - stop.size());
+            if (engine->m_output_buffer.size() >= stop.size() &&
+                engine->m_output_buffer.compare(
+                    engine->m_output_buffer.size() - stop.size(), stop.size(), stop) == 0) {
+                engine->m_output_buffer.erase(engine->m_output_buffer.size() - stop.size());
             }
+            engine->m_output_dirty = true;
+            engine->m_output_revision++;
+            engine->m_stop_hit_in_callback.store(true, std::memory_order_release);
+            return false;
         }
     }
 
@@ -1106,21 +1272,33 @@ bool AIEngine::stream_callback_v2(const char* piece, size_t len, void* user_data
 }
 
 void AIEngine::abort() {
-    m_is_task_running.store(false);
-    if (m_ctx) {
-        infer_abort(m_ctx);
+    m_cancel_requested.store(true, std::memory_order_release);
+    m_abort_load.store(true, std::memory_order_release);
+    infer_ctx* ctx = m_ctx.load(std::memory_order_acquire);
+    if (ctx) {
+        infer_abort(ctx);
     }
 }
 
 void AIEngine::wait() {
-    if (m_ctx) infer_wait(m_ctx);
+    infer_ctx* ctx = m_ctx.load(std::memory_order_acquire);
+    if (ctx) {
+        infer_wait(ctx);
+    }
     if (m_task_thread.joinable()) {
         m_task_thread.join();
     }
 }
 
 bool AIEngine::is_generating() const {
-    return m_is_task_running.load() || (m_ctx ? infer_is_generating(m_ctx) : false);
+    if (m_is_task_running.load(std::memory_order_acquire)) {
+        return true;
+    }
+    if (m_is_loading_model.load(std::memory_order_acquire)) {
+        return false;
+    }
+    infer_ctx* ctx = m_ctx.load(std::memory_order_acquire);
+    return ctx ? infer_is_generating(ctx) : false;
 }
 
 bool AIEngine::is_loading_model() const {
@@ -1186,12 +1364,10 @@ bool AIEngine::get_output_text_if_dirty(std::string& out_text, uint64_t& inout_r
             return false;
         }
 
-        if (m_output_dirty) {
-            m_output_dirty = false;
-            inout_rev = m_output_revision;
-            raw_buffer = m_output_buffer;
-            dirty = true;
-        }
+        m_output_dirty = false;
+        inout_rev = m_output_revision;
+        raw_buffer = m_output_buffer;
+        dirty = true;
     }
 
     if (dirty) {
