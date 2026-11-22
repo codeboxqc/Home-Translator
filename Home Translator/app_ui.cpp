@@ -941,7 +941,11 @@ void AppUI::render_download_window() {
 void AppUI::render_header_panel() {
     ImGui::TextColored(ImVec4(0.25f, 0.75f, 1.0f, 1.0f), "Local AI Translation & Publishing Suite Pro");
     ImGui::SameLine();
-    ImGui::TextDisabled("(SDL3 + ImGui + OpenGL3 + ");
+#if defined(_WIN32)
+    ImGui::TextDisabled("(SDL3 + ImGui + Direct3D11 + ");
+#else
+    ImGui::TextDisabled("(SDL3 + ImGui + SDL_Renderer + ");
+#endif
     ImGui::SameLine(0.0f, 0.0f);
 
     double cur_time = ImGui::GetTime();
@@ -1365,6 +1369,9 @@ void AppUI::render_text_editors_panel() {
         char* sdl_clip = SDL_GetClipboardText();
         if (sdl_clip) {
             if (std::strlen(sdl_clip) > 0) {
+                if (ImGui::GetCurrentContext()) {
+                    ImGui::ClearActiveID();
+                }
                 m_input_text = sdl_clip;
             }
             SDL_free(sdl_clip);

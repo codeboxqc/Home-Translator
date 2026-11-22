@@ -155,4 +155,91 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+
+  <!-- Auto-sync libinfer headers/import lib before compile/link (local CMake build or staged bundle) -->
+  <Target Name="SyncLibinferHeadersAndLib" BeforeTargets="ClCompile" Condition="'$(Platform)'=='x64'">
+    <PropertyGroup>
+      <_LibinferRoot>..\..\libinfer-main</_LibinferRoot>
+      <_LibinferBuildDir>$(_LibinferRoot)\build</_LibinferBuildDir>
+      <_HasLocalLibinferBuild Condition="Exists('$(_LibinferBuildDir)\libinfer.sln') or Exists('$(_LibinferBuildDir)\build.ninja')">true</_HasLocalLibinferBuild>
+      <_CmakeExe Condition="Exists('$(VsInstallRoot)\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">$(VsInstallRoot)\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</_CmakeExe>
+      <_CmakeExe Condition="'$(_CmakeExe)'==''">cmake</_CmakeExe>
+      <_LibinferStageDir>$(SolutionDir)x64\Home Translator</_LibinferStageDir>
+    </PropertyGroup>
+
+    <Exec Condition="'$(_HasLocalLibinferBuild)'=='true'"
+          Command="&quot;$(_CmakeExe)&quot; --build &quot;$(_LibinferBuildDir)&quot; --config Release" />
+
+    <!-- Sync infer.h and infer.lib from local CMake build if present -->
+    <Copy Condition="'$(_HasLocalLibinferBuild)'=='true' and Exists('$(_LibinferRoot)\include\infer.h')"
+          SourceFiles="$(_LibinferRoot)\include\infer.h"
+          DestinationFolder="$(ProjectDir)" SkipUnchangedFiles="true" />
+    <Copy Condition="'$(_HasLocalLibinferBuild)'=='true' and Exists('$(_LibinferBuildDir)\Release\infer.lib')"
+          SourceFiles="$(_LibinferBuildDir)\Release\infer.lib"
+          DestinationFolder="$(ProjectDir)" SkipUnchangedFiles="true" />
+    <Copy Condition="'$(_HasLocalLibinferBuild)'=='true' and !Exists('$(_LibinferBuildDir)\Release\infer.lib') and Exists('$(_LibinferBuildDir)\infer.lib')"
+          SourceFiles="$(_LibinferBuildDir)\infer.lib"
+          DestinationFolder="$(ProjectDir)" SkipUnchangedFiles="true" />
+
+    <!-- Otherwise sync infer.h and infer.lib from staged bundle folder if present -->
+    <Copy Condition="'$(_HasLocalLibinferBuild)'!='true' and Exists('$(_LibinferStageDir)\infer.h')"
+          SourceFiles="$(_LibinferStageDir)\infer.h"
+          DestinationFolder="$(ProjectDir)" SkipUnchangedFiles="true" />
+    <Copy Condition="'$(_HasLocalLibinferBuild)'!='true' and Exists('$(_LibinferStageDir)\infer.lib')"
+          SourceFiles="$(_LibinferStageDir)\infer.lib"
+          DestinationFolder="$(ProjectDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Auto-sync ALL runtime DLLs (infer, llama, ggml, ggml-cpu, cuda, vulkan, and safe vcpkg DLLs) -->
+  <Target Name="SyncAllRuntimeDlls" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
+    <PropertyGroup>
+      <_LibinferBuildDir>..\..\libinfer-main\build</_LibinferBuildDir>
+      <_HasLocalLibinferDll Condition="Exists('$(_LibinferBuildDir)\Release\infer.dll') or Exists('$(_LibinferBuildDir)\infer.dll')">true</_HasLocalLibinferDll>
+      <_LibinferStageDir>$(SolutionDir)x64\Home Translator</_LibinferStageDir>
+      <_VcpkgBinDir>$(_ZVcpkgCurrentInstalledDir)$(_ZVcpkgConfigSubdir)bin\</_VcpkgBinDir>
+    </PropertyGroup>
+
+    <!-- A1. Local CMake build outputs (VS multi-config or Ninja single-config) -->
+    <ItemGroup Condition="'$(_HasLocalLibinferDll)'=='true'">
+      <_InferCoreDlls Include="$(_LibinferBuildDir)\Release\infer.dll;$(_LibinferBuildDir)\infer.dll" />
+      <_InferCoreDlls Include="$(_LibinferBuildDir)\bin\Release\llama.dll;$(_LibinferBuildDir)\bin\Release\ggml.dll;$(_LibinferBuildDir)\bin\Release\ggml-base.dll;$(_LibinferBuildDir)\bin\Release\ggml-cpu*.dll" />
+      <_InferCoreDlls Include="$(_LibinferBuildDir)\bin\llama.dll;$(_LibinferBuildDir)\bin\ggml.dll;$(_LibinferBuildDir)\bin\ggml-base.dll;$(_LibinferBuildDir)\bin\ggml-cpu*.dll" />
+      <_InferCudaDlls Include="$(_LibinferBuildDir)\bin\Release\ggml-cuda*.dll;$(_LibinferBuildDir)\bin\ggml-cuda*.dll;$(_LibinferStageDir)\cuda\cudart64_*.dll;$(_LibinferStageDir)\cuda\cublas64_*.dll;$(_LibinferStageDir)\cuda\cublasLt64_*.dll" />
+      <_InferVulkanDlls Include="$(_LibinferBuildDir)\bin\Release\ggml-vulkan*.dll;$(_LibinferBuildDir)\bin\ggml-vulkan*.dll" />
+    </ItemGroup>
+
+    <!-- A2. Staged libinfer bundle folder (default when no local CMake build is configured) -->
+    <ItemGroup Condition="'$(_HasLocalLibinferDll)'!='true'">
+      <_InferCoreDlls Include="$(_LibinferStageDir)\infer.dll;$(_LibinferStageDir)\llama.dll;$(_LibinferStageDir)\ggml.dll;$(_LibinferStageDir)\ggml-base.dll;$(_LibinferStageDir)\ggml-cpu*.dll" />
+      <_InferCudaDlls Include="$(_LibinferStageDir)\cuda\*.dll" />
+      <_InferVulkanDlls Include="$(_LibinferStageDir)\vulkan\*.dll" />
+    </ItemGroup>
+
+    <!-- Filter to existing files only so missing optional backends (e.g. Vulkan) never fail the build -->
+    <ItemGroup>
+      <_ExistingInferCoreDlls Include="@(_InferCoreDlls)" Condition="Exists('%(FullPath)')" />
+      <_ExistingInferCudaDlls Include="@(_InferCudaDlls)" Condition="Exists('%(FullPath)')" />
+      <_ExistingInferVulkanDlls Include="@(_InferVulkanDlls)" Condition="Exists('%(FullPath)')" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(_ExistingInferCoreDlls)" DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" Condition="'@(_ExistingInferCoreDlls)'!=''" />
+    <Copy SourceFiles="@(_ExistingInferCudaDlls)" DestinationFolder="$(OutDir)cuda\"
+          SkipUnchangedFiles="true" Condition="'@(_ExistingInferCudaDlls)'!=''" />
+    <Copy SourceFiles="@(_ExistingInferVulkanDlls)" DestinationFolder="$(OutDir)vulkan\"
+          SkipUnchangedFiles="true" Condition="'@(_ExistingInferVulkanDlls)'!=''" />
+
+    <!-- B. Safe vcpkg app DLLs only (never overwrites llama.dll or ggml*.dll) -->
+    <ItemGroup Condition="'$(Configuration)'=='Release'">
+      <_SafeVcpkgDlls Include="$(_VcpkgBinDir)SDL3.dll;$(_VcpkgBinDir)libcurl.dll;$(_VcpkgBinDir)zip.dll;$(_VcpkgBinDir)z.dll;$(_VcpkgBinDir)bz2.dll" />
+    </ItemGroup>
+    <ItemGroup Condition="'$(Configuration)'=='Debug'">
+      <_SafeVcpkgDlls Include="$(_VcpkgBinDir)SDL3.dll;$(_VcpkgBinDir)libcurl-d.dll;$(_VcpkgBinDir)zip.dll;$(_VcpkgBinDir)zd.dll;$(_VcpkgBinDir)bz2d.dll" />
+    </ItemGroup>
+    <ItemGroup>
+      <_ExistingSafeVcpkgDlls Include="@(_SafeVcpkgDlls)" Condition="Exists('%(FullPath)')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ExistingSafeVcpkgDlls)" DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" Condition="'@(_ExistingSafeVcpkgDlls)'!=''" />
+  </Target>
 </Project>

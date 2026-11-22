@@ -22,7 +22,6 @@ namespace fs = std::filesystem;
 #include <windows.h>
 #if defined(_MSC_VER)
 #pragma comment(linker, "/subsystem:windows /ENTRY:mainCRTStartup")
-#pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "infer.lib")
 #endif
@@ -30,12 +29,12 @@ namespace fs = std::filesystem;
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
-#include <SDL3/SDL_opengl.h>
+#include <SDL3/SDL_render.h>
 #include <SDL3/SDL_video.h>
 
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
-#include <imgui_impl_opengl3.h>
+#include <imgui_impl_sdlrenderer3.h>
 
 #include "infer.h"
 #include "doc_parser.h"
@@ -328,15 +327,8 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    const char* glsl_version = "#version 330";
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-
     SDL_WindowFlags window_flags = static_cast<SDL_WindowFlags>(
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY
         );
 
     SDL_Window* window = SDL_CreateWindow(
@@ -352,19 +344,26 @@ int main(int argc, char** argv) {
 
     SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 
-    SDL_GLContext gl_context = SDL_GL_CreateContext(window);
-    if (!gl_context) {
-        std::fprintf(stderr, "Fatal Error: SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+    // Prefer Direct3D 11 on Windows so we never load NVIDIA's OpenGL ICD (nvoglv64.dll),
+    // which can deadlock in SwapBuffers/DWM on focus-loss/focus-gain while CUDA is active.
+#if defined(_WIN32)
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, "direct3d11");
+    if (!renderer) {
+        renderer = SDL_CreateRenderer(window, nullptr);
+    }
+#else
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
+#endif
+    if (!renderer) {
+        std::fprintf(stderr, "Fatal Error: SDL_CreateRenderer failed: %s\n", SDL_GetError());
         SDL_DestroyWindow(window);
         SDL_Quit();
         return EXIT_FAILURE;
     }
 
-    SDL_GL_MakeCurrent(window, gl_context);
-
-    // Set V-Sync Swap Interval ONCE at initialization.
-    // NEVER call SDL_GL_SetSwapInterval inside the frame loop!
-    SDL_GL_SetSwapInterval(0);
+    // Disable blocking VSync and pace frames cleanly so presentation never blocks on DWM
+    // when unfocused, occluded, or returning to focus.
+    SDL_SetRenderVSync(renderer, 0);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -374,8 +373,8 @@ int main(int argc, char** argv) {
     setup_unicode_fonts(io);
     setup_modern_theme();
 
-    ImGui_ImplSDL3_InitForOpenGL(window, gl_context);
-    ImGui_ImplOpenGL3_Init(glsl_version);
+    ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
+    ImGui_ImplSDLRenderer3_Init(renderer);
 
     AIEngine ai_engine;
     // Backend initialization is performed asynchronously inside AIEngine::load_model_async()
@@ -385,6 +384,24 @@ int main(int argc, char** argv) {
     app_ui.set_sdl_window(window);
 
 #if defined(_WIN32)
+    struct HotkeyHookState {
+        SDL_Window* window = nullptr;
+        AppUI* app_ui = nullptr;
+    } hotkey_state{ window, &app_ui };
+
+    SDL_SetWindowsMessageHook([](void* userdata, MSG* msg) -> bool {
+        if (msg && msg->message == WM_HOTKEY && msg->wParam == 0x4001) {
+            auto* st = static_cast<HotkeyHookState*>(userdata);
+            if (st && st->window && st->app_ui) {
+                SDL_RestoreWindow(st->window);
+                SDL_RaiseWindow(st->window);
+                st->app_ui->trigger_hotkey_clipboard_translate();
+            }
+            return false;
+        }
+        return true;
+    }, &hotkey_state);
+
     RegisterHotKey(nullptr, 0x4001, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'T');
 #endif
 
@@ -393,16 +410,6 @@ int main(int argc, char** argv) {
     bool running = true;
     while (running) {
         const auto frame_start = std::chrono::steady_clock::now();
-#if defined(_WIN32)
-        MSG win_msg{};
-        while (PeekMessage(&win_msg, nullptr, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {
-            if (win_msg.wParam == 0x4001) {
-                SDL_RestoreWindow(window);
-                SDL_RaiseWindow(window);
-                app_ui.trigger_hotkey_clipboard_translate();
-            }
-        }
-#endif
 
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
@@ -418,27 +425,44 @@ int main(int argc, char** argv) {
             if (event.type == SDL_EVENT_DROP_FILE) {
                 app_ui.handle_file_drop(event.drop.data);
             }
+            if (event.type == SDL_EVENT_RENDER_DEVICE_RESET ||
+                event.type == SDL_EVENT_RENDER_TARGETS_RESET) {
+                ImGui_ImplSDLRenderer3_DestroyDeviceObjects();
+                ImGui_ImplSDLRenderer3_CreateDeviceObjects();
+            }
         }
+
+#if defined(_WIN32)
+        // Guarantee the Win32 message queue is fully drained and timeLastRead is updated
+        // every frame so Windows never falsely marks the window as Not Responding.
+        {
+            MSG leftover{};
+            while (PeekMessageW(&leftover, nullptr, 0, 0, PM_REMOVE)) {
+                if (leftover.message == WM_HOTKEY && leftover.wParam == 0x4001) {
+                    SDL_RestoreWindow(window);
+                    SDL_RaiseWindow(window);
+                    app_ui.trigger_hotkey_clipboard_translate();
+                }
+                else {
+                    TranslateMessage(&leftover);
+                    DispatchMessageW(&leftover);
+                }
+            }
+        }
+#endif
 
         SDL_WindowFlags flags = SDL_GetWindowFlags(window);
         int display_w = 0, display_h = 0;
         SDL_GetWindowSizeInPixels(window, &display_w, &display_h);
 
-        // Safe minimize / hide / occlusion handling (avoid unnecessary GPU/OpenGL contention while hidden or fully covered)
+        // Safe minimize / hide / occlusion handling (avoid unnecessary GPU contention while hidden or fully covered)
         if ((flags & SDL_WINDOW_MINIMIZED) || (flags & SDL_WINDOW_HIDDEN) || (flags & SDL_WINDOW_OCCLUDED) ||
             display_w <= 0 || display_h <= 0) {
             SDL_Delay(33);
             continue;
         }
 
-        if (SDL_GL_GetCurrentContext() != gl_context) {
-            if (!SDL_GL_MakeCurrent(window, gl_context)) {
-                SDL_Delay(33);
-                continue;
-            }
-        }
-
-        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
 
         // Guard against 0.0f / NaN DeltaTime in fast Release builds and large spikes on restore
@@ -452,12 +476,11 @@ int main(int argc, char** argv) {
 
         ImGui::Render();
 
-        glViewport(0, 0, display_w, display_h);
-        glClearColor(0.08f, 0.09f, 0.12f, 1.00f);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        SDL_GL_SwapWindow(window);
+        SDL_SetRenderScale(renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
+        SDL_SetRenderDrawColor(renderer, 20, 23, 31, 255);
+        SDL_RenderClear(renderer);
+        ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
+        SDL_RenderPresent(renderer);
 
         const bool is_focused = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
         const uint64_t target_ns = is_focused ? TARGET_FRAME_NS : (1000000000ULL / 15ULL);
@@ -467,11 +490,24 @@ int main(int argc, char** argv) {
             ).count()
             );
         if (elapsed_ns < target_ns) {
+#if defined(_WIN32)
+            if (!is_focused) {
+                DWORD wait_ms = static_cast<DWORD>((target_ns - elapsed_ns) / 1000000ULL);
+                if (wait_ms > 0) {
+                    MsgWaitForMultipleObjects(0, nullptr, FALSE, wait_ms, QS_ALLINPUT);
+                }
+            }
+            else {
+                SDL_DelayNS(target_ns - elapsed_ns);
+            }
+#else
             SDL_DelayNS(target_ns - elapsed_ns);
+#endif
         }
     }
 
 #if defined(_WIN32)
+    SDL_SetWindowsMessageHook(nullptr, nullptr);
     UnregisterHotKey(nullptr, 0x4001);
 #endif
 
@@ -479,11 +515,11 @@ int main(int argc, char** argv) {
     SDL_HideWindow(window);
     ai_engine.shutdown();
 
-    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
-    SDL_GL_DestroyContext(gl_context);
+    SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
 

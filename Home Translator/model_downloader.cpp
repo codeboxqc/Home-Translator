@@ -167,85 +167,103 @@ void ModelDownloader::update_progress(uint64_t dlnow, uint64_t dltotal) {
 }
 
 void ModelDownloader::download_thread_proc(ModelPreset preset) {
-    fs::create_directories("models");
-    fs::path target_path = fs::absolute(fs::path("models") / preset.filename);
-    std::string out_path = target_path.string();
+    struct DownloadGuard {
+        ModelDownloader* self;
+        ~DownloadGuard() {
+            {
+                std::lock_guard<std::mutex> lock(self->m_status_mutex);
+                self->m_active_download_filename.clear();
+            }
+            self->m_is_downloading.store(false, std::memory_order_release);
+        }
+    } dl_guard{ this };
 
-    std::vector<char> disk_io_buffer(2 * 1024 * 1024);
-    std::ofstream out_file;
-    out_file.rdbuf()->pubsetbuf(disk_io_buffer.data(), static_cast<std::streamsize>(disk_io_buffer.size()));
-    out_file.open(out_path, std::ios::binary);
+    try {
+        std::error_code ec;
+        fs::create_directories("models", ec);
+        fs::path target_path = fs::absolute(fs::path("models") / preset.filename, ec);
+        if (ec) {
+            target_path = fs::path("models") / preset.filename;
+        }
+        std::string out_path = target_path.string();
 
-    if (!out_file.is_open()) {
-        {
+        std::vector<char> disk_io_buffer(2 * 1024 * 1024);
+        std::ofstream out_file;
+        out_file.rdbuf()->pubsetbuf(disk_io_buffer.data(), static_cast<std::streamsize>(disk_io_buffer.size()));
+        out_file.open(out_path, std::ios::binary);
+
+        if (!out_file.is_open()) {
             std::lock_guard<std::mutex> lock(m_status_mutex);
             m_status_message = "Error: Could not open output file for writing at " + out_path;
-            m_active_download_filename.clear();
+            return;
         }
-        m_is_downloading.store(false);
-        return;
-    }
 
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        {
-            std::lock_guard<std::mutex> lock(m_status_mutex);
-            m_status_message = "Error: Failed to initialize libcurl handle.";
-            m_active_download_filename.clear();
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            {
+                std::lock_guard<std::mutex> lock(m_status_mutex);
+                m_status_message = "Error: Failed to initialize libcurl handle.";
+            }
+            out_file.close();
+            fs::remove(out_path, ec);
+            return;
         }
+
+        curl_easy_setopt(curl, CURLOPT_URL, preset.url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out_file);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_xferinfo_cb);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, this);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "HomeTranslator/3.0-Pro");
+        curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
         out_file.close();
-        fs::remove(out_path);
-        m_is_downloading.store(false);
-        return;
-    }
 
-    curl_easy_setopt(curl, CURLOPT_URL, preset.url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out_file);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_xferinfo_cb);
-    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, this);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "HomeTranslator/3.0-Pro");
-    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        std::error_code sz_ec;
+        bool file_ok = fs::exists(out_path, sz_ec) && !sz_ec && (fs::file_size(out_path, sz_ec) > 1024 * 1024) && !sz_ec;
 
-    CURLcode res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    out_file.close();
-
-    if (m_cancel_requested.load() || res == CURLE_ABORTED_BY_CALLBACK) {
-        {
-            std::lock_guard<std::mutex> lock(m_status_mutex);
-            m_status_message = "Download cancelled by user.";
+        if (m_cancel_requested.load() || res == CURLE_ABORTED_BY_CALLBACK) {
+            {
+                std::lock_guard<std::mutex> lock(m_status_mutex);
+                m_status_message = "Download cancelled by user.";
+            }
+            fs::remove(out_path, ec);
+            m_progress.store(0.0f);
         }
-        fs::remove(out_path);
-        m_progress.store(0.0f);
-    }
-    else if (res == CURLE_OK && fs::exists(out_path) && fs::file_size(out_path) > 1024 * 1024) {
-        {
-            std::lock_guard<std::mutex> lock(m_status_mutex);
-            m_status_message = "Finished downloading: " + preset.filename;
-            m_downloaded_filepath = out_path;
+        else if (res == CURLE_OK && file_ok) {
+            {
+                std::lock_guard<std::mutex> lock(m_status_mutex);
+                m_status_message = "Finished downloading: " + preset.filename;
+                m_downloaded_filepath = out_path;
+            }
+            m_progress.store(1.0f);
+            m_completed.store(true);
         }
-        m_progress.store(1.0f);
-        m_completed.store(true);
-    }
-    else {
-        {
-            std::lock_guard<std::mutex> lock(m_status_mutex);
-            m_status_message = "Download failed: " + std::string(curl_easy_strerror(res));
+        else {
+            {
+                std::lock_guard<std::mutex> lock(m_status_mutex);
+                m_status_message = "Download failed: " + std::string(curl_easy_strerror(res));
+            }
+            fs::remove(out_path, ec);
+            m_progress.store(0.0f);
         }
-        fs::remove(out_path);
-        m_progress.store(0.0f);
     }
-
-    {
+    catch (const std::exception& ex) {
         std::lock_guard<std::mutex> lock(m_status_mutex);
-        m_active_download_filename.clear();
+        m_status_message = std::string("Download exception: ") + ex.what();
+        m_progress.store(0.0f);
     }
-    m_is_downloading.store(false);
+    catch (...) {
+        std::lock_guard<std::mutex> lock(m_status_mutex);
+        m_status_message = "Unknown exception during model download.";
+        m_progress.store(0.0f);
+    }
 }
 
 bool ModelDownloader::is_downloading() const {
